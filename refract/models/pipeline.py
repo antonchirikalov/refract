@@ -1,0 +1,190 @@
+"""``pipeline.yaml`` format (SPEC §8).
+
+Node types: ``builtin/<name>``, ``agent``, ``loop``, ``select`` — a
+discriminated union keyed by the ``type`` field. Reference strings
+(``scan.sources``, ``@body``, ``@choose.winner_model``) are kept verbatim;
+parsing/validating them is the graph validator's job (§8.1, §8.3).
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Annotated, Any, Literal, Union
+
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+
+_ID_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+class RetryParams(BaseModel):
+    """Params inherited by sub-steps of a node (SPEC §8.2)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    gate_retries: int = 2
+    infra_retries: int = 2
+    timeout_s: int | None = None  # None → agent defaults → 3600 (resolved later)
+
+
+class AgentParams(RetryParams):
+    """Params for an agent node (SPEC §8.2)."""
+
+    workers: int = 3  # only meaningful with map/map_over (graph enforces)
+    on_item_failure: Literal["skip", "fail"] = "skip"
+    min_ok: int = 1
+    model: str | None = None
+    cache: bool = False
+
+
+class LoopParams(RetryParams):
+    """Params for a loop node (SPEC §8.2)."""
+
+    max_rounds: int = 3
+    on_max_rounds: Literal["pass", "fail"] = "pass"
+    model: str | None = None
+    cache: bool = False
+
+
+class SelectParams(RetryParams):
+    """Params for a select node (SPEC §8.2)."""
+
+    fallback: Literal["first_ok", "fail"] = "first_ok"
+    model: str | None = None
+    cache: bool = False
+
+
+class SubBlockParams(BaseModel):
+    """Optional param overrides on a sub-block (``body``/``critic``/``selector``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    gate_retries: int | None = None
+    infra_retries: int | None = None
+    timeout_s: int | None = None
+    cache: bool | None = None
+
+
+class MapOver(BaseModel):
+    """``map_over: {models: [...]}`` fan-out over models (SPEC §8.1)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    models: list[str]
+
+
+class BodyBlock(BaseModel):
+    """``loop.body`` — exactly one agent (SPEC §8)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str
+    model: str | None = None
+    inputs: dict[str, str] = Field(default_factory=dict)
+    params: SubBlockParams | None = None
+
+
+class CriticBlock(BaseModel):
+    """``loop.critic`` — exactly one agent producing verdict@v1 (SPEC §8, §10.3)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str
+    model: str | None = None
+    inputs: dict[str, str] = Field(default_factory=dict)
+    params: SubBlockParams | None = None
+
+
+class SelectorBlock(BaseModel):
+    """``select.selector`` — one agent producing selection@v1 (SPEC §8, §10.3)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str
+    model: str | None = None
+    params: SubBlockParams | None = None
+
+
+class _NodeBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+
+    @field_validator("id")
+    @classmethod
+    def _node_id(cls, v: str) -> str:
+        if not _ID_RE.match(v):
+            raise ValueError(f"invalid node id: {v!r}")
+        return v
+
+
+class AgentNode(_NodeBase):
+    type: Literal["agent"]
+    agent: str
+    inputs: dict[str, str] = Field(default_factory=dict)
+    map: str | None = None
+    map_over: MapOver | None = None
+    params: AgentParams = Field(default_factory=AgentParams)
+
+
+class LoopNode(_NodeBase):
+    type: Literal["loop"]
+    params: LoopParams = Field(default_factory=LoopParams)
+    body: BodyBlock
+    critic: CriticBlock
+    outputs: dict[str, str]
+
+
+class SelectNode(_NodeBase):
+    type: Literal["select"]
+    candidates: str
+    selector: SelectorBlock
+    params: SelectParams = Field(default_factory=SelectParams)
+
+
+class BuiltinNode(_NodeBase):
+    """A ``builtin/<name>`` node; ``params`` validated later by the builtin (§13)."""
+
+    type: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("type")
+    @classmethod
+    def _builtin_type(cls, v: str) -> str:
+        if not v.startswith("builtin/") or len(v) <= len("builtin/"):
+            raise ValueError(f"not a builtin node type: {v!r}")
+        return v
+
+    @property
+    def builtin_name(self) -> str:
+        return self.type.split("/", 1)[1]
+
+
+def _node_discriminator(v: object) -> str | None:
+    t = v.get("type") if isinstance(v, dict) else getattr(v, "type", None)
+    if isinstance(t, str):
+        if t in ("agent", "loop", "select"):
+            return t
+        if t.startswith("builtin/"):
+            return "builtin"
+    return None
+
+
+Node = Annotated[
+    Union[
+        Annotated[AgentNode, Tag("agent")],
+        Annotated[LoopNode, Tag("loop")],
+        Annotated[SelectNode, Tag("select")],
+        Annotated[BuiltinNode, Tag("builtin")],
+    ],
+    Discriminator(_node_discriminator),
+]
+
+
+class Pipeline(BaseModel):
+    """``pipeline.yaml`` (SPEC §8)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str
+    name: str
+    nodes: list[Node]

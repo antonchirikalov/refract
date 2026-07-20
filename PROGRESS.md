@@ -23,8 +23,8 @@ closes an item. Phase table from SPEC §17.
 |---|---|---|
 | §3 | pyproject.toml | done |
 | §4 | repo scaffolding + PROGRESS.md | done |
-| §5 | models — file formats | remaining |
-| §5 | registry (artifact types + builtin types) | remaining |
+| §5–§9 | models — all file formats (types, agent, config, pipeline, ledger/events) | done |
+| §5 | registry (artifact types + builtin types, rules, edge compat, slugify) | done |
 | §8 | graph load + validator (all §8.3 codes) | remaining |
 | §10.5 | scheduler (no loop/select) | remaining |
 | §10.3 | map (+aggregation, provider semaphores) | remaining |

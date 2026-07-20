@@ -1,0 +1,504 @@
+"""Tests for the artifact type registry (SPEC §5)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from refract.models.errors import Code, RegistryError
+from refract.registry import (
+    INLINE_MAX_BYTES,
+    ArtifactRegistry,
+    check_edge,
+    make_collection,
+    model_slug,
+    parse_type_ref,
+    slugify,
+    unique_slug,
+)
+
+
+def _write_registry(
+    library_path: Path,
+    types_yaml: str,
+    schemas: dict[str, dict] | None = None,
+) -> None:
+    types_dir = library_path / "types"
+    types_dir.mkdir(parents=True, exist_ok=True)
+    (types_dir / "artifact_types.yaml").write_text(types_yaml, encoding="utf-8")
+    if schemas:
+        schema_dir = types_dir / "schemas"
+        schema_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in schemas.items():
+            (schema_dir / name).write_text(json.dumps(content), encoding="utf-8")
+
+
+# --- rules: regex / min_length ---------------------------------------------
+
+
+class TestRules:
+    def test_regex_rule_passes(self, tmp_path: Path) -> None:
+        # SPEC §5
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  requirements@v1:
+    kind: file
+    format: markdown
+    rules:
+      - { rule: regex, pattern: "^# Requirements:", flags: "m" }
+      - { rule: regex, pattern: "FR-\\\\d+" }
+""",
+        )
+        registry = ArtifactRegistry.load(tmp_path)
+        t = registry.get("requirements@v1")
+        assert t is not None
+        text = "intro\n# Requirements:\nsome stuff FR-12 done\n"
+        assert t.check_rules(text) == []
+
+    def test_regex_rule_fails(self, tmp_path: Path) -> None:
+        # SPEC §5
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  requirements@v1:
+    kind: file
+    format: markdown
+    rules:
+      - { rule: regex, pattern: "^# Requirements:", flags: "m" }
+      - { rule: regex, pattern: "FR-\\\\d+" }
+""",
+        )
+        registry = ArtifactRegistry.load(tmp_path)
+        t = registry.get("requirements@v1")
+        assert t is not None
+        failures = t.check_rules("no header here, no id either")
+        assert len(failures) == 2
+        assert all(isinstance(f, str) and f for f in failures)
+
+    def test_regex_multiline_flag_required(self, tmp_path: Path) -> None:
+        """Without the 'm' flag, ^ only matches start of string (SPEC §5)."""
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  no_flag@v1: { kind: file, format: markdown, rules: [{ rule: regex, pattern: "^header" }] }
+  with_flag@v1: { kind: file, format: markdown, rules: [{ rule: regex, pattern: "^header", flags: "m" }] }
+""",
+        )
+        registry = ArtifactRegistry.load(tmp_path)
+        text = "intro\nheader\n"
+        no_flag = registry.get("no_flag@v1")
+        with_flag = registry.get("with_flag@v1")
+        assert no_flag is not None and with_flag is not None
+        assert no_flag.check_rules(text) != []
+        assert with_flag.check_rules(text) == []
+
+    def test_min_length_passes(self, tmp_path: Path) -> None:
+        # SPEC §5
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  design_doc@v1: { kind: file, format: markdown, rules: [{ rule: min_length, value: 10 }] }
+""",
+        )
+        registry = ArtifactRegistry.load(tmp_path)
+        t = registry.get("design_doc@v1")
+        assert t is not None
+        assert t.check_rules("x" * 10) == []
+
+    def test_min_length_fails(self, tmp_path: Path) -> None:
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  design_doc@v1: { kind: file, format: markdown, rules: [{ rule: min_length, value: 2000 }] }
+""",
+        )
+        registry = ArtifactRegistry.load(tmp_path)
+        t = registry.get("design_doc@v1")
+        assert t is not None
+        failures = t.check_rules("too short")
+        assert len(failures) == 1
+
+
+# --- inline flag / should_inline --------------------------------------------
+
+
+class TestInline:
+    def test_default_inline_is_false(self, tmp_path: Path) -> None:
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  plain@v1: { kind: file, format: text }
+""",
+        )
+        registry = ArtifactRegistry.load(tmp_path)
+        t = registry.get("plain@v1")
+        assert t is not None
+        assert t.inline is False
+        assert t.should_inline(10) is False
+
+    def test_inline_true_under_limit(self, tmp_path: Path) -> None:
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  small@v1: { kind: file, format: text, inline: true }
+""",
+        )
+        registry = ArtifactRegistry.load(tmp_path)
+        t = registry.get("small@v1")
+        assert t is not None
+        assert t.should_inline(INLINE_MAX_BYTES - 1) is True
+
+    def test_inline_boundary_at_4kb_is_exclusive(self, tmp_path: Path) -> None:
+        """SPEC §5: inline permitted for size < 4KB — boundary itself is excluded."""
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  small@v1: { kind: file, format: text, inline: true }
+""",
+        )
+        registry = ArtifactRegistry.load(tmp_path)
+        t = registry.get("small@v1")
+        assert t is not None
+        assert t.should_inline(INLINE_MAX_BYTES) is False
+        assert t.should_inline(INLINE_MAX_BYTES + 1) is False
+
+    def test_inline_flag_false_even_under_limit(self, tmp_path: Path) -> None:
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  no_inline@v1: { kind: file, format: text, inline: false }
+""",
+        )
+        registry = ArtifactRegistry.load(tmp_path)
+        t = registry.get("no_inline@v1")
+        assert t is not None
+        assert t.should_inline(1) is False
+
+
+# --- E_RESERVED_TYPE ---------------------------------------------------------
+
+
+class TestReservedType:
+    def test_declaring_reserved_name_raises(self, tmp_path: Path) -> None:
+        # SPEC §5
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  verdict@v1: { kind: file, format: json }
+""",
+        )
+        with pytest.raises(RegistryError) as exc_info:
+            ArtifactRegistry.load(tmp_path)
+        assert exc_info.value.code == Code.E_RESERVED_TYPE
+
+    @pytest.mark.parametrize(
+        "reserved_name", ["verdict@v1", "selection@v1", "question@v1", "answer@v1"]
+    )
+    def test_each_reserved_name_raises(
+        self, tmp_path: Path, reserved_name: str
+    ) -> None:
+        _write_registry(
+            tmp_path,
+            f"""
+version: "0.1"
+types:
+  {reserved_name}: {{ kind: any }}
+""",
+        )
+        with pytest.raises(RegistryError) as exc_info:
+            ArtifactRegistry.load(tmp_path)
+        assert exc_info.value.code == Code.E_RESERVED_TYPE
+
+
+# --- unknown type ------------------------------------------------------------
+
+
+class TestUnknownType:
+    def test_get_unknown_returns_none(self, tmp_path: Path) -> None:
+        registry = ArtifactRegistry.builtins_only()
+        assert registry.get("nope@v1") is None
+
+    def test_knows_ref_false_for_unknown(self) -> None:
+        registry = ArtifactRegistry.builtins_only()
+        assert registry.knows_ref("nope@v1") is False
+
+    def test_knows_ref_true_for_builtin(self) -> None:
+        registry = ArtifactRegistry.builtins_only()
+        assert registry.knows_ref("verdict@v1") is True
+
+    def test_knows_ref_unwraps_collection(self) -> None:
+        registry = ArtifactRegistry.builtins_only()
+        assert registry.knows_ref("collection<verdict@v1>") is True
+        assert registry.knows_ref("collection<nope@v1>") is False
+
+
+# --- builtin control types ---------------------------------------------------
+
+
+class TestBuiltinControlTypes:
+    @pytest.mark.parametrize(
+        "name", ["verdict@v1", "selection@v1", "question@v1", "answer@v1"]
+    )
+    def test_builtin_control_types_exist_and_shape(self, name: str) -> None:
+        # SPEC §5
+        registry = ArtifactRegistry.builtins_only()
+        t = registry.get(name)
+        assert t is not None
+        assert t.is_control_type is True
+        assert t.kind.value == "file"
+        assert t.format.value == "json"
+        assert t.inline is True
+
+    def test_non_control_type_is_not_control(self, tmp_path: Path) -> None:
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  source@v1: { kind: any }
+""",
+        )
+        registry = ArtifactRegistry.load(tmp_path)
+        t = registry.get("source@v1")
+        assert t is not None
+        assert t.is_control_type is False
+
+    def test_verdict_schema_valid_payload(self) -> None:
+        registry = ArtifactRegistry.builtins_only()
+        t = registry.get("verdict@v1")
+        assert t is not None
+        assert t.validate_json({"verdict": "approved"}) == []
+        assert t.validate_json({"verdict": "revise", "issues": [{"note": "x"}]}) == []
+
+    def test_verdict_schema_invalid_payload(self) -> None:
+        registry = ArtifactRegistry.builtins_only()
+        t = registry.get("verdict@v1")
+        assert t is not None
+        assert t.validate_json({"verdict": "maybe"}) != []
+        assert t.validate_json({}) != []
+
+    def test_selection_schema(self) -> None:
+        registry = ArtifactRegistry.builtins_only()
+        t = registry.get("selection@v1")
+        assert t is not None
+        assert t.validate_json({"winner": "rfp-doc"}) == []
+        assert t.validate_json({"rationale": "no winner key"}) != []
+
+    def test_question_schema(self) -> None:
+        registry = ArtifactRegistry.builtins_only()
+        t = registry.get("question@v1")
+        assert t is not None
+        assert t.validate_json({"question": "why?"}) == []
+        assert t.validate_json({"context": "no question key"}) != []
+
+    def test_answer_schema(self) -> None:
+        registry = ArtifactRegistry.builtins_only()
+        t = registry.get("answer@v1")
+        assert t is not None
+        assert t.validate_json({"answer": "42"}) == []
+        assert t.validate_json({}) != []
+
+
+# --- edge compatibility -------------------------------------------------------
+
+
+class TestCheckEdge:
+    def test_exact_match_ok(self) -> None:
+        assert check_edge("extract@v1", "extract@v1", via_map=False) is None
+
+    def test_mismatch(self) -> None:
+        assert (
+            check_edge("extract@v1", "source@v1", via_map=False) == Code.E_TYPE_MISMATCH
+        )
+
+    def test_collection_to_collection_ok(self) -> None:
+        assert (
+            check_edge(
+                "collection<extract@v1>", "collection<extract@v1>", via_map=False
+            )
+            is None
+        )
+
+    def test_collection_to_scalar_requires_via_map(self) -> None:
+        assert (
+            check_edge("collection<extract@v1>", "extract@v1", via_map=False)
+            == Code.E_TYPE_MISMATCH
+        )
+        assert check_edge("collection<extract@v1>", "extract@v1", via_map=True) is None
+
+    def test_collection_to_mismatched_scalar(self) -> None:
+        assert (
+            check_edge("collection<extract@v1>", "source@v1", via_map=True)
+            == Code.E_TYPE_MISMATCH
+        )
+
+    def test_scalar_to_collection_mismatch(self) -> None:
+        assert (
+            check_edge("extract@v1", "collection<extract@v1>", via_map=False)
+            == Code.E_TYPE_MISMATCH
+        )
+        assert (
+            check_edge("extract@v1", "collection<extract@v1>", via_map=True)
+            == Code.E_TYPE_MISMATCH
+        )
+
+
+# --- slugify / model_slug / unique_slug / make_collection / parse_type_ref --
+
+
+class TestSlugHelpers:
+    def test_slugify_lowercases_and_replaces(self) -> None:
+        assert slugify("Kimi K3!") == "kimi-k3"
+
+    def test_slugify_trims_leading_trailing_dashes(self) -> None:
+        assert slugify("  -Hello World- ") == "hello-world"
+
+    def test_slugify_collapses_runs(self) -> None:
+        assert slugify("a---b__c") == "a-b-c"
+
+    def test_unique_slug_no_collision(self) -> None:
+        assert unique_slug("rfp-doc", set()) == "rfp-doc"
+
+    def test_unique_slug_collision_suffix_2(self) -> None:
+        assert unique_slug("rfp-doc", {"rfp-doc"}) == "rfp-doc-2"
+
+    def test_unique_slug_collision_suffix_3(self) -> None:
+        assert unique_slug("rfp-doc", {"rfp-doc", "rfp-doc-2"}) == "rfp-doc-3"
+
+    def test_model_slug(self) -> None:
+        # SPEC §5 example
+        assert model_slug("kimi/kimi-k3") == "kimi_kimi-k3"
+
+    def test_model_slug_openai(self) -> None:
+        assert model_slug("openai/gpt-5.6") == "openai_gpt-5-6"
+
+    def test_make_collection(self) -> None:
+        assert make_collection("extract@v1") == "collection<extract@v1>"
+
+    def test_parse_type_ref_plain(self) -> None:
+        assert parse_type_ref("extract@v1") == ("extract@v1", False)
+
+    def test_parse_type_ref_collection(self) -> None:
+        assert parse_type_ref("collection<extract@v1>") == ("extract@v1", True)
+
+
+# --- loading a valid user artifact_types.yaml --------------------------------
+
+
+class TestLoadUserRegistry:
+    def test_user_types_resolve_alongside_builtins(self, tmp_path: Path) -> None:
+        # SPEC §5 example from spec text
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  source@v1:        { kind: any }
+  extract@v1:       { kind: file, format: json, schema: extract.schema.json }
+  requirements@v1:
+    kind: file
+    format: markdown
+    rules:
+      - { rule: regex, pattern: "^# Requirements:", flags: "m" }
+      - { rule: regex, pattern: "FR-\\\\d+" }
+  design_doc@v1:    { kind: file, format: markdown, rules: [{ rule: min_length, value: 2000 }] }
+  discovery_report@v1: { kind: file, format: markdown }
+""",
+            schemas={"extract.schema.json": {"type": "object"}},
+        )
+        registry = ArtifactRegistry.load(tmp_path)
+
+        # user types
+        assert registry.get("source@v1") is not None
+        extract = registry.get("extract@v1")
+        assert extract is not None
+        assert extract.schema == {"type": "object"}
+        assert extract.is_builtin is False
+
+        # builtins still present
+        for name in ("verdict@v1", "selection@v1", "question@v1", "answer@v1"):
+            t = registry.get(name)
+            assert t is not None
+            assert t.is_builtin is True
+
+    def test_missing_types_file_yields_builtins_only(self, tmp_path: Path) -> None:
+        registry = ArtifactRegistry.load(tmp_path)
+        assert registry.get("verdict@v1") is not None
+        assert registry.names() == list(ArtifactRegistry.builtins_only().names())
+
+    def test_missing_schema_file_raises_e_schema(self, tmp_path: Path) -> None:
+        _write_registry(
+            tmp_path,
+            """
+version: "0.1"
+types:
+  extract@v1: { kind: file, format: json, schema: missing.schema.json }
+""",
+        )
+        with pytest.raises(RegistryError) as exc_info:
+            ArtifactRegistry.load(tmp_path)
+        assert exc_info.value.code == Code.E_SCHEMA
+
+    def test_malformed_yaml_raises_e_yaml(self, tmp_path: Path) -> None:
+        types_dir = tmp_path / "types"
+        types_dir.mkdir(parents=True)
+        # Unbalanced bracket → YAML parse error.
+        (types_dir / "artifact_types.yaml").write_text(
+            'version: "0.1"\ntypes: {extract@v1: [\n', encoding="utf-8"
+        )
+        with pytest.raises(RegistryError) as exc_info:
+            ArtifactRegistry.load(tmp_path)
+        assert exc_info.value.code == Code.E_YAML
+
+    def test_malformed_json_schema_raises_e_schema(self, tmp_path: Path) -> None:
+        types_dir = tmp_path / "types"
+        (types_dir / "schemas").mkdir(parents=True)
+        (types_dir / "artifact_types.yaml").write_text(
+            'version: "0.1"\n'
+            "types:\n"
+            "  extract@v1: { kind: file, format: json, schema: broken.schema.json }\n",
+            encoding="utf-8",
+        )
+        # Syntactically broken JSON.
+        (types_dir / "schemas" / "broken.schema.json").write_text(
+            '{"type": "object",,}', encoding="utf-8"
+        )
+        with pytest.raises(RegistryError) as exc_info:
+            ArtifactRegistry.load(tmp_path)
+        assert exc_info.value.code == Code.E_SCHEMA
+
+    def test_invalid_json_schema_document_raises_e_schema(self, tmp_path: Path) -> None:
+        # Valid JSON, but not a valid Draft 2020-12 schema (type must be str/array).
+        _write_registry(
+            tmp_path,
+            'version: "0.1"\n'
+            "types:\n"
+            "  extract@v1: { kind: file, format: json, schema: bad.schema.json }\n",
+            schemas={"bad.schema.json": {"type": 123}},
+        )
+        with pytest.raises(RegistryError) as exc_info:
+            ArtifactRegistry.load(tmp_path)
+        assert exc_info.value.code == Code.E_SCHEMA

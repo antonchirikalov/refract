@@ -1,6 +1,309 @@
 """Artifact type registry (SPEC §5).
 
 Loads ``library/types/artifact_types.yaml`` and injects the built-in control
-types (verdict@v1, selection@v1, question@v1, answer@v1). Owns slugify and the
-collection<X> type constructor.
+types (verdict@v1, selection@v1, question@v1, answer@v1). Owns slugify, the
+``collection<X>`` type constructor, the rule set, and edge compatibility.
 """
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+import yaml
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+from pydantic import ValidationError as PydanticValidationError
+
+from refract.models.errors import Code, RegistryError
+from refract.models.types import (
+    ArtifactTypeDef,
+    ArtifactTypesFile,
+    MinLengthRule,
+    RegexRule,
+    Rule,
+    TypeFormat,
+    TypeKind,
+)
+
+# --- constants -------------------------------------------------------------
+
+INLINE_MAX_BYTES = 4096  # SPEC §5 / §11: inline permitted only below this size
+
+_BUILTIN_SCHEMA_DIR = Path(__file__).parent / "schemas"
+
+# Built-in control types are NOT in the registry file; the engine injects them
+# (kind file, format json, inline true) with schemas from refract/schemas/.
+CONTROL_TYPES: dict[str, str] = {
+    "verdict@v1": "verdict.schema.json",
+    "selection@v1": "selection.schema.json",
+    "question@v1": "question.schema.json",
+    "answer@v1": "answer.schema.json",
+}
+
+_TYPE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*@v\d+$")
+_COLLECTION_RE = re.compile(r"^collection<(.+)>$")
+
+_EXT: dict[TypeFormat, str] = {
+    TypeFormat.json: ".json",
+    TypeFormat.markdown: ".md",
+    TypeFormat.text: ".txt",
+}
+
+_REGEX_FLAGS: dict[str, int] = {
+    "m": re.MULTILINE,
+    "i": re.IGNORECASE,
+    "s": re.DOTALL,
+    "x": re.VERBOSE,
+    "a": re.ASCII,
+    "u": re.UNICODE,
+}
+
+
+# --- type-ref helpers (collection constructor + edge compatibility) --------
+
+
+def parse_type_ref(ref: str) -> tuple[str, bool]:
+    """Split a type reference into ``(inner_name, is_collection)`` (SPEC §5)."""
+    m = _COLLECTION_RE.match(ref)
+    if m:
+        return m.group(1), True
+    return ref, False
+
+
+def make_collection(inner: str) -> str:
+    """The ``collection<X>`` type constructor (SPEC §5)."""
+    return f"collection<{inner}>"
+
+
+def check_edge(source_type: str, target_type: str, *, via_map: bool) -> Code | None:
+    """Edge compatibility (SPEC §5).
+
+    ``T → T`` (exact). ``collection<X>`` connects to a ``collection<X>`` input,
+    or to an ``X`` input only through ``map:``. Returns ``E_TYPE_MISMATCH`` on
+    an incompatible edge, else ``None``.
+    """
+    s_inner, s_coll = parse_type_ref(source_type)
+    t_inner, t_coll = parse_type_ref(target_type)
+
+    if not s_coll and not t_coll:
+        return None if source_type == target_type else Code.E_TYPE_MISMATCH
+    if s_coll and t_coll:
+        return None if s_inner == t_inner else Code.E_TYPE_MISMATCH
+    if s_coll and not t_coll:
+        if via_map and s_inner == t_inner:
+            return None
+        return Code.E_TYPE_MISMATCH
+    # target is a collection but source is not
+    return Code.E_TYPE_MISMATCH
+
+
+# --- slugify (single implementation, SPEC §5) ------------------------------
+
+
+def slugify(s: str) -> str:
+    """lowercase; ``[^a-z0-9]+ → -``; trim leading/trailing ``-`` (SPEC §5)."""
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+
+
+def unique_slug(base: str, taken: set[str]) -> str:
+    """Resolve slug collisions with ``-2``, ``-3`` suffixes (SPEC §5)."""
+    if base not in taken:
+        return base
+    i = 2
+    while f"{base}-{i}" in taken:
+        i += 1
+    return f"{base}-{i}"
+
+
+def model_slug(model: str) -> str:
+    """``slugify(provider) + "_" + slugify(model_id)`` (SPEC §5), e.g. kimi_kimi-k3."""
+    provider, _, model_id = model.partition("/")
+    return f"{slugify(provider)}_{slugify(model_id)}"
+
+
+# --- resolved type ---------------------------------------------------------
+
+
+class ResolvedType:
+    """A registered artifact type with its (optional) compiled JSON schema."""
+
+    def __init__(
+        self,
+        name: str,
+        defn: ArtifactTypeDef,
+        *,
+        is_builtin: bool,
+        schema: dict[str, object] | None,
+    ) -> None:
+        self.name = name
+        self.kind: TypeKind = defn.kind
+        self.format: TypeFormat | None = defn.format
+        self.schema_file: str | None = defn.schema_file
+        self.rules: list[Rule] = defn.rules
+        self.inline: bool = defn.inline
+        self.is_builtin = is_builtin
+        self.schema = schema
+        self._validator = Draft202012Validator(schema) if schema is not None else None
+
+    @property
+    def is_control_type(self) -> bool:
+        return self.name in CONTROL_TYPES
+
+    def ext(self) -> str | None:
+        """Artifact file extension for this type's format (SPEC §10.4)."""
+        return _EXT.get(self.format) if self.format is not None else None
+
+    def should_inline(self, size_bytes: int) -> bool:
+        """Whether content of this size may be inlined into a prompt (SPEC §5/§11)."""
+        return self.inline and size_bytes < INLINE_MAX_BYTES
+
+    def check_rules(self, text: str) -> list[str]:
+        """Return a list of rule-failure messages; empty means all rules pass (§5)."""
+        failures: list[str] = []
+        for rule in self.rules:
+            if isinstance(rule, RegexRule):
+                flags = 0
+                for ch in rule.flags or "":
+                    flags |= _REGEX_FLAGS.get(ch, 0)
+                if re.search(rule.pattern, text, flags) is None:
+                    failures.append(f"regex {rule.pattern!r} not found")
+            elif isinstance(rule, MinLengthRule):
+                if len(text) < rule.value:
+                    failures.append(
+                        f"min_length {rule.value} not met (got {len(text)})"
+                    )
+        return failures
+
+    def validate_json(self, data: object) -> list[str]:
+        """Return JSON-schema error messages; empty means valid (SPEC §10.2 gate)."""
+        if self._validator is None:
+            return []
+        return [e.message for e in self._validator.iter_errors(data)]
+
+
+# --- registry --------------------------------------------------------------
+
+
+def _validate_type_name(name: str) -> None:
+    if not _TYPE_NAME_RE.match(name):
+        raise RegistryError(Code.E_SCHEMA, f"invalid type name: {name!r}")
+
+
+def _read_json_schema(path: Path) -> dict[str, object]:
+    """Read + parse a JSON schema file and validate the schema itself (SPEC §5).
+
+    A malformed JSON document or an invalid schema surfaces as ``E_SCHEMA`` at
+    load time, not as an opaque crash later during gate validation.
+    """
+    try:
+        schema: dict[str, object] = json.loads(path.read_text("utf-8"))
+    except json.JSONDecodeError as e:
+        raise RegistryError(
+            Code.E_SCHEMA, f"invalid JSON schema {path.name}: {e}"
+        ) from e
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as e:
+        raise RegistryError(
+            Code.E_SCHEMA, f"invalid JSON schema {path.name}: {e.message}"
+        ) from e
+    return schema
+
+
+class ArtifactRegistry:
+    """The resolved set of artifact types (user + injected built-ins)."""
+
+    def __init__(self, types: dict[str, ResolvedType]) -> None:
+        self._types = types
+
+    @staticmethod
+    def _load_builtins() -> dict[str, ResolvedType]:
+        out: dict[str, ResolvedType] = {}
+        for name, fname in CONTROL_TYPES.items():
+            schema = _read_json_schema(_BUILTIN_SCHEMA_DIR / fname)
+            defn = ArtifactTypeDef.model_validate(
+                {
+                    "kind": "file",
+                    "format": "json",
+                    "inline": True,
+                    "schema": fname,
+                }
+            )
+            out[name] = ResolvedType(name, defn, is_builtin=True, schema=schema)
+        return out
+
+    @classmethod
+    def builtins_only(cls) -> "ArtifactRegistry":
+        """Registry containing only the injected control types (SPEC §5)."""
+        return cls(cls._load_builtins())
+
+    @classmethod
+    def load(cls, library_path: Path | str) -> "ArtifactRegistry":
+        """Load ``library/types/artifact_types.yaml`` and inject built-ins (SPEC §5).
+
+        Raises ``RegistryError`` with ``E_RESERVED_TYPE`` if a user type reuses a
+        reserved control name, ``E_YAML`` if the types file is not valid YAML, or
+        ``E_SCHEMA`` on a schema-invalid types file, a missing referenced JSON
+        schema, or a malformed/invalid referenced JSON schema.
+        """
+        library_path = Path(library_path)
+        types = cls._load_builtins()
+
+        types_file = library_path / "types" / "artifact_types.yaml"
+        if not types_file.exists():
+            return cls(types)
+
+        try:
+            raw = yaml.safe_load(types_file.read_text("utf-8")) or {}
+        except yaml.YAMLError as e:
+            raise RegistryError(Code.E_YAML, f"{types_file}: {e}") from e
+
+        try:
+            parsed = ArtifactTypesFile.model_validate(raw)
+        except PydanticValidationError as e:
+            raise RegistryError(Code.E_SCHEMA, f"{types_file}: {e}") from e
+
+        schema_dir = library_path / "types" / "schemas"
+        for name, defn in parsed.types.items():
+            if name in CONTROL_TYPES:
+                raise RegistryError(
+                    Code.E_RESERVED_TYPE,
+                    f"{name!r} is a reserved built-in control type",
+                )
+            _validate_type_name(name)
+            schema: dict[str, object] | None = None
+            if defn.schema_file is not None:
+                schema_path = schema_dir / defn.schema_file
+                if not schema_path.exists():
+                    raise RegistryError(
+                        Code.E_SCHEMA,
+                        f"schema file not found for {name}: {defn.schema_file}",
+                    )
+                schema = _read_json_schema(schema_path)
+            types[name] = ResolvedType(name, defn, is_builtin=False, schema=schema)
+
+        return cls(types)
+
+    # --- lookups -----------------------------------------------------------
+
+    def get(self, name: str) -> ResolvedType | None:
+        return self._types.get(name)
+
+    def has(self, name: str) -> bool:
+        return name in self._types
+
+    def knows_ref(self, ref: str) -> bool:
+        """Whether a (possibly ``collection<X>``) reference names a known type."""
+        inner, _ = parse_type_ref(ref)
+        return inner in self._types
+
+    def is_reserved(self, name: str) -> bool:
+        return name in CONTROL_TYPES
+
+    def is_control_type(self, name: str) -> bool:
+        return name in CONTROL_TYPES
+
+    def names(self) -> list[str]:
+        return list(self._types)

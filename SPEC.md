@@ -140,8 +140,12 @@ types:
 Поля записи: `kind ∈ {file, dir, any}`; `format ∈ {json, markdown, text}` (только для file;
 закрытый набор v0.1); `schema` — имя файла в `library/types/schemas/` (только для json);
 `rules` — список из закрытого набора: `regex {pattern, flags?}` (по содержимому),
-`min_length {value}` (символов); `inline: bool` (default false) — разрешение инлайнить
-содержимое в промпт при размере < 4 KB.
+`min_length {value}` (символов) (только для file); `inline: bool` (default false) —
+разрешение инлайнить содержимое в промпт при размере < 4 KB.
+
+> CHANGED (2026-07-20): `rules` явно ограничены `kind=file` (правила применяются к
+> содержимому; для `dir`/`any` бессмысленны). Согласует SPEC с моделью
+> `ArtifactTypeDef` (аудит §5). Инвариант поведения не меняется.
 
 **Встроенные управляющие типы** — НЕ в файле реестра: движок инжектит их при загрузке
 (`verdict@v1`, `selection@v1`, `question@v1`, `answer@v1`; kind file, format json, inline true,
