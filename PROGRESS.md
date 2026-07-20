@@ -25,7 +25,8 @@ closes an item. Phase table from SPEC §17.
 | §4 | repo scaffolding + PROGRESS.md | done |
 | §5–§9 | models — all file formats (types, agent, config, pipeline, ledger/events) | done |
 | §5 | registry (artifact types + builtin types, rules, edge compat, slugify) | done |
-| §8 | graph load + validator (all §8.3 codes) | remaining |
+| §8 | graph load + validator (all §8.3 codes) + toposort | done |
+| §13 | builtin registry metadata (ports/params; run deferred) | done |
 | §10.5 | scheduler (no loop/select) | remaining |
 | §10.3 | map (+aggregation, provider semaphores) | remaining |
 | §13 | builtin/scanner | remaining |
