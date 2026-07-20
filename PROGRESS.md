@@ -34,7 +34,8 @@ closes an item. Phase table from SPEC §17.
 | §9 | state (nodes+steps, resume, force-step) | remaining |
 | §9 | snapshot | remaining |
 | §11 | prompt assembly | remaining |
-| §12 | runtime base + mock + opencode compile | remaining |
+| §12 | runtime base (protocol, StepSpec/StepResult) + MockRuntime | done |
+| §12 | opencode compile (agent-md + opencode.json) | remaining |
 | §14 | CLI (validate/run/status/resume) | remaining |
 | §4 | examples/demo-project | remaining |
 | §17 | migrate source_processor + requirements_writer | remaining |
