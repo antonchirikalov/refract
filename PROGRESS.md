@@ -31,7 +31,7 @@ closes an item. Phase table from SPEC §17.
 | §10.3 | map (+aggregation, provider semaphores) | remaining |
 | §13 | builtin/scanner | remaining |
 | §10.2 | steps (gate retries+feedback, attempts, outcome taxonomy) | remaining |
-| §9 | state (nodes+steps, resume, force-step) | remaining |
+| §9 | state ledger (nodes+steps, atomic write, crash recovery, retry-failed) | done |
 | §9 | snapshot | remaining |
 | §11 | prompt assembly | remaining |
 | §12 | runtime base (protocol, StepSpec/StepResult) + MockRuntime | done |
