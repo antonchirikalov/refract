@@ -1,0 +1,9 @@
+## Output
+
+Produce exactly the following artifact(s). Write nothing else to the output directory.
+{% for o in outputs %}
+### `{{ o.port }}` ({{ o.type }}){% if o.optional %} — optional{% endif %}
+
+Write to: `{{ o.path }}`
+{{ o.summary }}
+{% endfor %}

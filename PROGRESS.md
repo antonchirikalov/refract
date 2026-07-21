@@ -33,7 +33,8 @@ closes an item. Phase table from SPEC §17.
 | §10.2 | steps (gate retries+feedback, attempts, outcome taxonomy) | remaining |
 | §9 | state ledger (nodes+steps, atomic write, crash recovery, retry-failed) | done |
 | §9 | snapshot | remaining |
-| §11 | prompt assembly | remaining |
+| §10.1/§10.4 | artifacts: link_or_copy, materialization, gate | done |
+| §11 | prompt assembly (jinja2 templates) | done |
 | §12 | runtime base (protocol, StepSpec/StepResult) + MockRuntime | done |
 | §12 | opencode compile (agent-md + opencode.json) | remaining |
 | §14 | CLI (validate/run/status/resume) | remaining |
