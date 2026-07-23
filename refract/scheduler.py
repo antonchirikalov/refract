@@ -3,28 +3,37 @@
 A node is ready when all nodes sourcing its inputs (including binding deps) are
 done/reused. Ready nodes run concurrently under per-provider semaphores.
 
-Phase 0 scope: plain ``agent`` nodes (one step each) and ``builtin`` nodes
-(e.g. scanner, deterministic, no runner). A plain agent may consume a whole
-collection; producing one is map's job. Meta-nodes (loop/select) and map fan-out
-are separate items (SPEC §10.3) and are rejected up front with a clear
-``NotImplementedError`` until their lifecycles land.
+Phase 0 scope: plain ``agent`` nodes, ``map`` nodes (collection fan-out: one
+step per ok item, reassembled into an output collection), and ``builtin`` nodes
+(e.g. scanner). A plain agent may consume a whole collection; producing one is
+map's job (I6). ``map_over`` (models fan-out) and meta-nodes (loop/select) are
+separate items and are rejected up front with a clear ``NotImplementedError``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
-from refract.artifacts import artifact_path
+from refract.artifacts import artifact_path, link_or_copy
 from refract.builtins import BUILTINS
 from refract.events import EventWriter, utcnow_iso
 from refract.graph import DataRef, parse_ref
 from refract.models.agent import AgentSpec
 from refract.models.ledger import NodeStatus, RunStatus, StepOutcome, StepStatus
-from refract.models.pipeline import AgentNode, BuiltinNode, Pipeline
-from refract.registry import ArtifactRegistry
+from refract.models.pipeline import AgentNode, BuiltinNode, Node, Pipeline
+from refract.models.types import (
+    CollectionItem,
+    CollectionManifest,
+    CollectionStats,
+    CollectionStatus,
+    ItemInfo,
+)
+from refract.registry import ArtifactRegistry, ResolvedType, make_collection
 from refract.runtime.base import AgentRuntime
 from refract.state import Ledger
 from refract.steps import (
@@ -33,6 +42,7 @@ from refract.steps import (
     DirAnyInput,
     FileInput,
     InputSpec,
+    MapItemInput,
     execute_agent_step,
 )
 
@@ -48,7 +58,10 @@ def node_dependencies(pipeline: Pipeline) -> dict[str, set[str]]:
     deps: dict[str, set[str]] = {n.id: set() for n in pipeline.nodes}
     for node in pipeline.nodes:
         if isinstance(node, AgentNode):
-            for ref_s in node.inputs.values():
+            refs = list(node.inputs.values())
+            if node.map is not None:  # the mapped collection is a dependency too
+                refs.append(node.map)
+            for ref_s in refs:
                 ref = parse_ref(ref_s)
                 if isinstance(ref, DataRef) and ref.node_id in ids:
                     deps[node.id].add(ref.node_id)
@@ -58,9 +71,15 @@ def node_dependencies(pipeline: Pipeline) -> dict[str, set[str]]:
 # --- input resolution (SPEC §10.1/§10.4) ------------------------------------
 
 
-def _step_output_dir(run_dir: Path, node_id: str) -> Path:
-    """Where a plain node's single step writes its artifacts (SPEC §9 step table)."""
-    return run_dir / "steps" / node_id / "main" / "output"
+def _node_output_base(run_dir: Path, node: Node) -> Path:
+    """Directory that holds a producer node's port outputs (SPEC §9/§10.3).
+
+    Plain agent/builtin nodes write to ``steps/<id>/main/output/``; a map node
+    assembles its output collection under ``steps/<id>/_out/``.
+    """
+    if isinstance(node, AgentNode) and node.map is not None:
+        return run_dir / "steps" / node.id / "_out"
+    return run_dir / "steps" / node.id / "main" / "output"
 
 
 def _build_inputs(
@@ -68,7 +87,12 @@ def _build_inputs(
     run_dir: Path,
     agents: dict[str, AgentSpec],
     registry: ArtifactRegistry,
+    nodes: dict[str, "Node"],
 ) -> list[InputSpec]:
+    """Resolve a node's non-mapped inputs (``node.inputs``) to materializable specs.
+
+    The mapped port (for a map node) is bound per-element by the map loop, not here.
+    """
     agent = agents[node.agent]
     consume_type = {p.port: p.type for p in agent.consumes}
     specs: list[InputSpec] = []
@@ -76,11 +100,11 @@ def _build_inputs(
         ref = parse_ref(ref_s)
         if not isinstance(ref, DataRef):
             raise NotImplementedError(f"unsupported input ref {ref_s!r} on {node.id}")
-        producer_out = _step_output_dir(run_dir, ref.node_id)
+        producer_out = _node_output_base(run_dir, nodes[ref.node_id])
         ptype = consume_type[port]
         if ptype.startswith("collection<"):
             # a plain agent may consume a whole collection (I6 forbids producing
-            # one, not consuming). The producer wrote it under output/<producer_port>/.
+            # one, not consuming). The producer wrote it under <base>/<producer_port>/.
             specs.append(CollectionInput(port=port, src=producer_out / ref.port))
             continue
         rtype = registry.get(ptype)
@@ -103,6 +127,7 @@ def _agent_plan(
     run_dir: Path,
     agents: dict[str, AgentSpec],
     registry: ArtifactRegistry,
+    nodes: dict[str, Node],
 ) -> AgentStepPlan:
     agent = agents[node.agent]
     model = node.params.model
@@ -117,7 +142,7 @@ def _agent_plan(
         agent_dir=run_dir / "snapshot" / "agents" / node.agent,
         model=model,
         registry=registry,
-        inputs=_build_inputs(node, run_dir, agents, registry),
+        inputs=_build_inputs(node, run_dir, agents, registry, nodes),
         timeout_s=timeout,
         gate_retries=node.params.gate_retries,
         infra_retries=node.params.infra_retries,
@@ -126,6 +151,135 @@ def _agent_plan(
 
 def _provider_of(model: str) -> str:
     return model.split("/", 1)[0]
+
+
+# --- map fan-out (SPEC §10.3) -----------------------------------------------
+
+
+@dataclass(frozen=True)
+class _MapBinding:
+    """Resolved binding for a map node: how elements come in and go out."""
+
+    mapped_port: str  # consume port bound to one collection element
+    input_dir: Path  # producer collection dir (holds _collection.json + slugs)
+    out_port: str  # agent's primary produce port
+    out_rtype: ResolvedType
+    out_collection_type: str  # collection<primary produce type>
+
+
+def _map_binding(
+    node: AgentNode,
+    agent: AgentSpec,
+    nodes: dict[str, Node],
+    registry: ArtifactRegistry,
+    run_dir: Path,
+) -> _MapBinding:
+    assert node.map is not None
+    ref = parse_ref(node.map)
+    assert isinstance(ref, DataRef)
+    # mapped port = the one consumes port NOT satisfied by node.inputs (validator
+    # guarantees exactly one; the rest are shared inputs) (SPEC §8.1).
+    mapped = [p for p in agent.consumes if p.port not in node.inputs]
+    if len(mapped) != 1:
+        raise ValueError(
+            f"map node {node.id!r}: expected 1 mapped port, got {len(mapped)}"
+        )
+    primary = [p for p in agent.produces if not p.optional]
+    if len(primary) != 1:
+        raise ValueError(f"map node {node.id!r}: agent has no single primary output")
+    out_rtype = registry.get(primary[0].type)
+    if out_rtype is None:
+        raise KeyError(f"unknown produce type {primary[0].type!r} on {node.id}")
+    return _MapBinding(
+        mapped_port=mapped[0].port,
+        input_dir=_node_output_base(run_dir, nodes[ref.node_id]) / ref.port,
+        out_port=primary[0].port,
+        out_rtype=out_rtype,
+        out_collection_type=make_collection(primary[0].type),
+    )
+
+
+def _read_collection(collection_dir: Path) -> CollectionManifest:
+    raw = json.loads((collection_dir / "_collection.json").read_text("utf-8"))
+    return CollectionManifest.model_validate(raw)
+
+
+def _copy_element_payload(
+    step_output: Path, slug_dir: Path, out_port: str, rtype: ResolvedType
+) -> None:
+    """Copy one element's produced artifact into its output-collection slug dir (§10.4)."""
+    slug_dir.mkdir(parents=True, exist_ok=True)
+    if rtype.kind.value == "file":
+        src = artifact_path(step_output, out_port, rtype)
+        link_or_copy(src, slug_dir / src.name)
+    else:  # dir | any: copy the port dir's contents
+        src_dir = step_output / out_port
+        if src_dir.is_dir():
+            for child in sorted(src_dir.iterdir()):
+                link_or_copy(child, slug_dir / child.name)
+
+
+def _assemble_map_output(
+    node: AgentNode,
+    spec: _MapBinding,
+    in_manifest: CollectionManifest,
+    results: dict[str, StepOutcome],
+    *,
+    run_dir: Path,
+) -> int:
+    """Assemble ``steps/<node>/_out/<port>/`` from element steps (§10.3). Returns ok count.
+
+    Idempotent: the output dir is rebuilt from scratch so resume/re-assembly is safe.
+    ``ok`` elements carry their payload; failed input items and failed steps are
+    copied into the manifest with ``status: failed`` (payload absent).
+    """
+    out_dir = run_dir / "steps" / node.id / "_out" / spec.out_port
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    items: list[CollectionItem] = []
+    ok = 0
+    for item in in_manifest.items:
+        step_ok = (
+            item.status is CollectionStatus.ok
+            and results.get(item.slug) is StepOutcome.ok
+        )
+        if step_ok:
+            step_output = run_dir / "steps" / node.id / item.slug / "output"
+            _copy_element_payload(
+                step_output, out_dir / item.slug, spec.out_port, spec.out_rtype
+            )
+            status, error, ok = CollectionStatus.ok, None, ok + 1
+        else:
+            outcome = results.get(item.slug)
+            status = CollectionStatus.failed
+            error = (
+                item.error
+                if item.status is CollectionStatus.failed
+                else (outcome.value if outcome is not None else "not executed")
+            )
+        items.append(
+            CollectionItem(
+                slug=item.slug,
+                source=item.source,
+                source_hash=item.source_hash,
+                status=status,
+                path=f"{item.slug}/",
+                error=error,
+            )
+        )
+
+    manifest = CollectionManifest(
+        type=spec.out_collection_type,
+        items=items,
+        stats=CollectionStats(total=len(items), ok=ok, failed=len(items) - ok),
+    )
+    (out_dir / "_collection.json").write_text(
+        json.dumps(manifest.model_dump(mode="json"), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return ok
 
 
 # --- the run loop -----------------------------------------------------------
@@ -155,7 +309,9 @@ async def run_pipeline(
     # cannot finish cleanly (I10). Supported: plain agent nodes + builtin/scanner.
     # map fan-out and loop/select meta-nodes are separate items (SPEC §10.3).
     for nid, node in nodes.items():
-        supported_agent = isinstance(node, AgentNode) and node.map is None
+        # plain agent or map node (map: collection fan-out). map_over (models
+        # fan-out) is Phase 1; loop/select are separate items.
+        supported_agent = isinstance(node, AgentNode) and node.map_over is None
         supported_builtin = (
             isinstance(node, BuiltinNode)
             and BUILTINS.get(node.builtin_name) is not None
@@ -281,12 +437,85 @@ async def run_pipeline(
         set_node(node.id, NodeStatus.done)
         return NodeStatus.done
 
+    async def run_map_node(node: AgentNode) -> NodeStatus:
+        """Fan a map node out over its input collection, one step per ok item (§10.3)."""
+        agent = agents[node.agent]
+        model = node.params.model
+        assert model is not None
+        spec = _map_binding(node, agent, nodes, registry, run_dir)
+        shared = _build_inputs(node, run_dir, agents, registry, nodes)
+        manifest = _read_collection(spec.input_dir)
+
+        set_node(node.id, NodeStatus.running)
+        workers_sem = asyncio.Semaphore(max(1, node.params.workers))
+        results: dict[str, StepOutcome] = {}
+
+        async def run_item(item: CollectionItem) -> None:
+            step_id = f"{node.id}:{item.slug}"
+            existing = ledger.get_step(step_id)
+            if existing is not None and existing.status is StepStatus.done:
+                results[item.slug] = existing.outcome or StepOutcome.ok
+                return
+            item_input = MapItemInput(
+                port=spec.mapped_port,
+                src=spec.input_dir / item.slug,
+                item=ItemInfo(
+                    slug=item.slug, source=item.source, source_hash=item.source_hash
+                ),
+            )
+            plan = AgentStepPlan(
+                step_id=step_id,
+                node_id=node.id,
+                workdir=run_dir / "steps" / node.id / item.slug,
+                agent=agent,
+                agent_dir=run_dir / "snapshot" / "agents" / node.agent,
+                model=model,
+                registry=registry,
+                inputs=[item_input, *shared],
+                timeout_s=node.params.timeout_s or agent.defaults.timeout_s,
+                gate_retries=node.params.gate_retries,
+                infra_retries=node.params.infra_retries,
+            )
+            async with workers_sem, semaphore_for(model):
+                step = await execute_agent_step(
+                    plan,
+                    runtime,
+                    ledger,
+                    on_event=emit_event,
+                    clock=clock,
+                    sleeper=sleeper,
+                )
+            results[item.slug] = step.outcome or StepOutcome.failed_infra
+
+        ok_items = [i for i in manifest.items if i.status is CollectionStatus.ok]
+        await asyncio.gather(*(run_item(i) for i in ok_items))
+
+        # assemble the output collection (idempotent: node done only after this)
+        ok_count = _assemble_map_output(node, spec, manifest, results, run_dir=run_dir)
+        failed_count = len(manifest.items) - ok_count
+        fail_node = ok_count < node.params.min_ok or (
+            node.params.on_item_failure == "fail" and failed_count > 0
+        )
+        if fail_node:
+            set_node(
+                node.id,
+                NodeStatus.failed,
+                error=f"map: ok={ok_count} min_ok={node.params.min_ok} failed={failed_count}",
+            )
+            return NodeStatus.failed
+        set_node(node.id, NodeStatus.done)
+        return NodeStatus.done
+
     async def run_node(node_id: str) -> NodeStatus:
         node = nodes[node_id]
         if isinstance(node, BuiltinNode):
             return await run_builtin(node)
         assert isinstance(node, AgentNode)  # guaranteed by the up-front check
-        plan = _agent_plan(node, run_dir=run_dir, agents=agents, registry=registry)
+        if node.map is not None:
+            return await run_map_node(node)
+        plan = _agent_plan(
+            node, run_dir=run_dir, agents=agents, registry=registry, nodes=nodes
+        )
         async with semaphore_for(plan.model):
             # flip to running only once actually executing, not while queued
             set_node(node_id, NodeStatus.running)

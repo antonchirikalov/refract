@@ -28,7 +28,7 @@ closes an item. Phase table from SPEC §17.
 | §8 | graph load + validator (all §8.3 codes) + toposort | done |
 | §13 | builtin registry metadata (ports/params; run deferred) | done |
 | §10.5 | scheduler (no loop/select) | done |
-| §10.3 | map (+aggregation, provider semaphores) | remaining |
+| §10.3 | map (+aggregation, provider semaphores) | done (map:; map_over is Phase 1) |
 | §13 | builtin/scanner | done |
 | §10.2 | steps: single lifecycle (gate retries+feedback, attempts, outcomes, timeout, infra retries) | done |
 | §9 | state ledger (nodes+steps, atomic write, crash recovery, retry-failed) | done |
@@ -41,5 +41,5 @@ closes an item. Phase table from SPEC §17.
 | §14 | CLI (validate/run/status/resume) | remaining |
 | §4 | examples/demo-project | remaining |
 | §17 | migrate source_processor + requirements_writer | remaining |
-| §18 | Phase 0 tests | in progress (models/registry/graph/steps/state/snapshot/scheduler/events/scanner covered; map/CLI remaining) |
+| §18 | Phase 0 tests | in progress (models/registry/graph/steps/state/snapshot/scheduler/events/scanner/map covered; CLI remaining) |
 
