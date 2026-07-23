@@ -1,0 +1,14 @@
+name: requirements_writer
+version: 1
+description: >
+  Synthesizes a single requirements document from the collection of per-source
+  extracts. The body agent of the Extract pipeline's refine loop: it drafts the
+  document, a critic reviews it, and on 'revise' it drafts again (loop is Phase
+  1; the contract is stable now).
+consumes:
+  - { port: extracts, type: collection<extract@v1> }
+produces:
+  - { port: requirements, type: requirements@v1 }
+needs: [read]
+defaults:
+  timeout_s: 1800

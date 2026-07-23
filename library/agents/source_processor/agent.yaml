@@ -1,0 +1,13 @@
+name: source_processor
+version: 1
+description: >
+  Processes one source document (transcript, RFP, PDF, notes, spreadsheet) into
+  a structured extract@v1. The per-item worker of the Extract pipeline: the
+  engine fans it out over the scanned source collection via a map node (§10.3).
+consumes:
+  - { port: source, type: source@v1 }
+produces:
+  - { port: extract, type: extract@v1 }
+needs: [read, vision]
+defaults:
+  timeout_s: 1800

@@ -5,13 +5,16 @@ closes an item. Phase table from SPEC §17.
 
 ## Current phase
 
-**Phase 0** — engine + CLI scaffolding and core. (SPEC §17)
+**Phase 0 complete** — engine + CLI core done (all §18 Phase-0 tests green, mypy/ruff
+clean). Remaining before the phase can be *signed off*: manual smoke on real opencode
+(the OpencodeRuntime execution half + `docs/opencode-smoke.md` are Phase 1). **Next: Phase
+1** — metanodes (loop/select), map_over, winner_model binding, rerun/reuse. (SPEC §17)
 
 ## Phase status
 
 | Phase | Scope (SPEC §17) | Status |
 |---|---|---|
-| 0 | pyproject+scaffolding, PROGRESS.md, models, registry (+builtin types), graph+validator (all §8.3 codes), scheduler (no loop/select), map (+aggregation, provider semaphores), scanner, steps (full §10.2), state (nodes+steps, resume, force-step), snapshot, prompt, runtime base+mock+opencode-compile, CLI (validate/run/status/resume), examples/demo-project, migrate source_processor + requirements_writer | **in progress** |
+| 0 | pyproject+scaffolding, PROGRESS.md, models, registry (+builtin types), graph+validator (all §8.3 codes), scheduler (no loop/select), map (+aggregation, provider semaphores), scanner, steps (full §10.2), state (nodes+steps, resume, force-step), snapshot, prompt, runtime base+mock+opencode-compile, CLI (validate/run/status/resume), examples/demo-project, migrate source_processor + requirements_writer | **done** (real-opencode manual smoke pending in Phase 1) |
 | 1 | metanodes (loop/select), map_over.models, winner_model binding, rerun/reuse, `refract rerun`, remaining spectra agents, 3 library templates, docs/opencode-smoke.md | remaining |
 | 2 | api/ + WS; frontend UI spec separate | remaining |
 | 3 | HITL, capability tiers, confirmations | remaining |
@@ -40,6 +43,6 @@ closes an item. Phase table from SPEC §17.
 | §12 | opencode compile (agent-md + opencode.json) | done (compile only; runtime exec + smoke doc are Phase 1) |
 | §14 | CLI (validate/run/status/resume) + agents list | done (rerun is Phase 1) |
 | §4 | examples/demo-project | done (demo_writer agent + scanner→map demo) |
-| §17 | migrate source_processor + requirements_writer | remaining |
+| §17 | migrate source_processor + requirements_writer | done (+ extract@v1 type/schema; refract-native prompts per I5) |
 | §18 | Phase 0 tests | done (models/registry/graph/steps/state/snapshot/scheduler/events/scanner/map/cli+E2E-golden/opencode_compile covered) |
 

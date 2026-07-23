@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "extract@v1",
+  "description": "Structured extraction from a single source document (SPEC §5). One per source; assembled into collection<extract@v1> by the map node.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source", "requirements", "trust_level"],
+  "properties": {
+    "source": {
+      "type": "string",
+      "description": "Human-readable identifier of the source this extraction came from."
+    },
+    "requirements": {
+      "type": "array",
+      "description": "Discrete requirements found in the source. Empty is valid.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text"],
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "type": "string" },
+          "category": {
+            "type": "string",
+            "enum": ["functional", "non_functional", "constraint", "assumption"]
+          }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "description": "Decisions the source records as already made.",
+      "items": { "type": "string" }
+    },
+    "constraints": {
+      "type": "array",
+      "description": "Technical, budget, timeline or regulatory constraints.",
+      "items": { "type": "string" }
+    },
+    "open_questions": {
+      "type": "array",
+      "description": "Gaps and ambiguities to resolve later; prefer flagging over guessing.",
+      "items": { "type": "string" }
+    },
+    "trust_level": {
+      "type": "string",
+      "description": "Confidence in this extraction given the source's clarity.",
+      "enum": ["high", "medium", "low"]
+    }
+  }
+}
