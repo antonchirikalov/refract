@@ -37,9 +37,9 @@ closes an item. Phase table from SPEC §17.
 | §10.1/§10.4 | artifacts: link_or_copy, materialization, gate | done |
 | §11 | prompt assembly (jinja2 templates) | done |
 | §12 | runtime base (protocol, StepSpec/StepResult) + MockRuntime | done |
-| §12 | opencode compile (agent-md + opencode.json) | remaining |
+| §12 | opencode compile (agent-md + opencode.json) | done (compile only; runtime exec + smoke doc are Phase 1) |
 | §14 | CLI (validate/run/status/resume) + agents list | done (rerun is Phase 1) |
 | §4 | examples/demo-project | done (demo_writer agent + scanner→map demo) |
 | §17 | migrate source_processor + requirements_writer | remaining |
-| §18 | Phase 0 tests | in progress (models/registry/graph/steps/state/snapshot/scheduler/events/scanner/map/cli+E2E-golden covered; opencode_compile remaining) |
+| §18 | Phase 0 tests | done (models/registry/graph/steps/state/snapshot/scheduler/events/scanner/map/cli+E2E-golden/opencode_compile covered) |
 
