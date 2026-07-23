@@ -30,7 +30,7 @@ closes an item. Phase table from SPEC §17.
 | §10.5 | scheduler (no loop/select) | remaining |
 | §10.3 | map (+aggregation, provider semaphores) | remaining |
 | §13 | builtin/scanner | remaining |
-| §10.2 | steps (gate retries+feedback, attempts, outcome taxonomy) | remaining |
+| §10.2 | steps: single lifecycle (gate retries+feedback, attempts, outcomes, timeout, infra retries) | done |
 | §9 | state ledger (nodes+steps, atomic write, crash recovery, retry-failed) | done |
 | §9 | snapshot | remaining |
 | §10.1/§10.4 | artifacts: link_or_copy, materialization, gate | done |
@@ -41,3 +41,4 @@ closes an item. Phase table from SPEC §17.
 | §4 | examples/demo-project | remaining |
 | §17 | migrate source_processor + requirements_writer | remaining |
 | §18 | Phase 0 tests | remaining |
+

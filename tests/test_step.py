@@ -1,0 +1,557 @@
+"""Tests for the single step lifecycle (SPEC §10.2, §9, §10.1, §10.4, §11)."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+
+from refract.models.agent import AgentSpec
+from refract.models.ledger import StepOutcome, StepStatus
+from refract.models.types import ItemInfo
+from refract.registry import ArtifactRegistry
+from refract.runtime.base import EventCallback, StepResult, StepSpec
+from refract.runtime.mock import MockRuntime, ScriptedResponse
+from refract.state import Ledger
+from refract.steps import (
+    AgentStepPlan,
+    CollectionInput,
+    DirAnyInput,
+    FileInput,
+    MapItemInput,
+    execute_agent_step,
+)
+
+# --- fixtures / builders -----------------------------------------------------
+
+
+def _write_registry(tmp_path: Path) -> ArtifactRegistry:
+    types_dir = tmp_path / "lib" / "types"
+    types_dir.mkdir(parents=True, exist_ok=True)
+    (types_dir / "artifact_types.yaml").write_text(
+        """
+version: "0.1"
+types:
+  source@v1:   { kind: any }
+  extract@v1:  { kind: file, format: json, schema: extract.schema.json }
+  requirements@v1:
+    kind: file
+    format: markdown
+    rules:
+      - { rule: min_length, value: 20 }
+""",
+        encoding="utf-8",
+    )
+    schema_dir = types_dir / "schemas"
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    (schema_dir / "extract.schema.json").write_text(
+        json.dumps({"type": "object", "required": ["value"]}), encoding="utf-8"
+    )
+    return ArtifactRegistry.load(tmp_path / "lib")
+
+
+def _agent(**kwargs: object) -> AgentSpec:
+    base: dict[str, object] = {
+        "name": "writer",
+        "version": 1,
+        "consumes": [],
+        "produces": [{"port": "doc", "type": "requirements@v1"}],
+    }
+    base.update(kwargs)
+    return AgentSpec.model_validate(base)
+
+
+def _plan(
+    tmp_path: Path,
+    registry: ArtifactRegistry,
+    agent: AgentSpec,
+    *,
+    step_id: str = "write:main",
+    node_id: str = "write",
+    inputs: list | None = None,
+    gate_retries: int = 2,
+    infra_retries: int = 2,
+    timeout_s: int = 3600,
+    agent_prompt: str = "You are a writer agent.",
+) -> AgentStepPlan:
+    workdir = tmp_path / "steps" / node_id / "main"
+    workdir.mkdir(parents=True, exist_ok=True)
+    agent_dir = tmp_path / "agent_pkg"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "prompt.md").write_text(agent_prompt, encoding="utf-8")
+    return AgentStepPlan(
+        step_id=step_id,
+        node_id=node_id,
+        workdir=workdir,
+        agent=agent,
+        agent_dir=agent_dir,
+        model="mock/mock-1",
+        registry=registry,
+        inputs=inputs or [],
+        gate_retries=gate_retries,
+        infra_retries=infra_retries,
+        timeout_s=timeout_s,
+    )
+
+
+def _ledger(tmp_path: Path, node_ids: list[str]) -> Ledger:
+    return Ledger.create(
+        tmp_path / "run",
+        run_id="run_test",
+        pipeline="p",
+        node_ids=node_ids,
+        created_at="t0",
+    )
+
+
+def _clock_seq() -> "callable":
+    counter = {"n": 0}
+
+    def clock() -> str:
+        counter["n"] += 1
+        return f"T{counter['n']}"
+
+    return clock
+
+
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
+@pytest.fixture
+def registry(tmp_path: Path) -> ArtifactRegistry:
+    return _write_registry(tmp_path)
+
+
+# --- 1. input materialization -------------------------------------------------
+
+
+class TestInputMaterialization:
+    async def test_file_input_lands_at_port_dot_ext(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        # SPEC §10.1
+        rtype = registry.get("extract@v1")
+        assert rtype is not None
+        src = tmp_path / "src" / "extract.json"
+        src.parent.mkdir(parents=True)
+        src.write_text(json.dumps({"value": 1}), encoding="utf-8")
+
+        agent = _agent(
+            consumes=[{"port": "extracted", "type": "extract@v1"}],
+            produces=[{"port": "doc", "type": "requirements@v1"}],
+        )
+        plan = _plan(
+            tmp_path,
+            registry,
+            agent,
+            inputs=[FileInput(port="extracted", src=src, rtype=rtype)],
+        )
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime(
+            {
+                "*": [
+                    ScriptedResponse(
+                        files={"doc.md": "x" * 30 + "\nRequirements body here."}
+                    )
+                ]
+            }
+        )
+        await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        dst = plan.workdir / "input" / "extracted" / "extracted.json"
+        assert dst.exists()
+        assert json.loads(dst.read_text("utf-8")) == {"value": 1}
+
+    async def test_dir_any_input_flattened(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        # SPEC §10.1: dir source -> contents placed directly in port dir
+        src_dir = tmp_path / "src_dir"
+        src_dir.mkdir()
+        (src_dir / "a.txt").write_text("A", encoding="utf-8")
+
+        agent = _agent(consumes=[{"port": "source", "type": "source@v1"}])
+        plan = _plan(
+            tmp_path,
+            registry,
+            agent,
+            inputs=[DirAnyInput(port="source", src=src_dir)],
+        )
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime({"*": [ScriptedResponse(files={"doc.md": "y" * 30})]})
+        await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        port_dir = plan.workdir / "input" / "source"
+        assert (port_dir / "a.txt").read_text("utf-8") == "A"
+        assert not (port_dir / "src_dir").exists()
+
+    async def test_dir_any_input_file_source_under_own_name(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        src_file = tmp_path / "rfp.pdf"
+        src_file.write_text("payload", encoding="utf-8")
+        agent = _agent(consumes=[{"port": "source", "type": "source@v1"}])
+        plan = _plan(
+            tmp_path,
+            registry,
+            agent,
+            inputs=[DirAnyInput(port="source", src=src_file)],
+        )
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime({"*": [ScriptedResponse(files={"doc.md": "z" * 30})]})
+        await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+        assert (plan.workdir / "input" / "source" / "rfp.pdf").read_text(
+            "utf-8"
+        ) == "payload"
+
+    async def test_collection_input_writes_manifest_and_items(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        src_coll = tmp_path / "src_collection"
+        src_coll.mkdir()
+        (src_coll / "_collection.json").write_text(
+            json.dumps(
+                {
+                    "type": "collection<extract@v1>",
+                    "items": [
+                        {
+                            "slug": "item-1",
+                            "source": "a.json",
+                            "source_hash": "sha256:abc",
+                            "status": "ok",
+                            "path": "item-1/",
+                            "error": None,
+                        }
+                    ],
+                    "stats": {"total": 1, "ok": 1, "failed": 0},
+                }
+            ),
+            encoding="utf-8",
+        )
+        item_dir = src_coll / "item-1"
+        item_dir.mkdir()
+        (item_dir / "extract.json").write_text(
+            json.dumps({"value": 1}), encoding="utf-8"
+        )
+
+        agent = _agent(
+            consumes=[{"port": "extracts", "type": "collection<extract@v1>"}]
+        )
+        plan = _plan(
+            tmp_path,
+            registry,
+            agent,
+            inputs=[CollectionInput(port="extracts", src=src_coll)],
+        )
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime({"*": [ScriptedResponse(files={"doc.md": "w" * 30})]})
+        await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        port_dir = plan.workdir / "input" / "extracts"
+        assert (port_dir / "_collection.json").exists()
+        assert (port_dir / "item-1" / "extract.json").exists()
+
+    async def test_map_item_input_writes_payload_and_item_json(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        payload = tmp_path / "rfp.pdf"
+        payload.write_text("payload", encoding="utf-8")
+        item = ItemInfo(slug="rfp-doc", source="rfp.pdf", source_hash="sha256:abc")
+
+        agent = _agent(consumes=[{"port": "source", "type": "source@v1"}])
+        plan = _plan(
+            tmp_path,
+            registry,
+            agent,
+            inputs=[MapItemInput(port="source", src=payload, item=item)],
+        )
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime({"*": [ScriptedResponse(files={"doc.md": "v" * 30})]})
+        await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        port_dir = plan.workdir / "input" / "source"
+        assert (port_dir / "rfp.pdf").read_text("utf-8") == "payload"
+        round_tripped = ItemInfo.model_validate_json(
+            (port_dir / "_item.json").read_text("utf-8")
+        )
+        assert round_tripped == item
+
+
+# --- 2. prompt.md composition -------------------------------------------------
+
+
+class TestPromptComposition:
+    async def test_system_prompt_is_prefix_of_workdir_prompt(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        # SPEC §11 item 1: agent's prompt.md is the system part (prefix)
+        agent = _agent()
+        plan = _plan(
+            tmp_path,
+            registry,
+            agent,
+            agent_prompt="SYSTEM PROMPT MARKER\nBe concise.",
+        )
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime({"*": [ScriptedResponse(files={"doc.md": "a" * 30})]})
+        await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        full_prompt = (plan.workdir / "prompt.md").read_text("utf-8")
+        assert full_prompt.startswith("SYSTEM PROMPT MARKER\nBe concise.")
+
+
+# --- 3. happy path -------------------------------------------------------------
+
+
+class TestHappyPath:
+    async def test_completed_and_gate_passes(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        agent = _agent()
+        plan = _plan(tmp_path, registry, agent)
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime({"*": [ScriptedResponse(files={"doc.md": "b" * 30})]})
+        state = await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        assert state.status is StepStatus.done
+        assert state.outcome is StepOutcome.ok
+        assert state.tries == 1
+
+        record = ledger.get_step(plan.step_id)
+        assert record is not None
+        assert record.status is StepStatus.done
+        assert record.outcome is StepOutcome.ok
+        assert record.tries == 1
+
+        assert (plan.workdir / "raw.txt").exists()
+        assert (plan.workdir / "agent.events.jsonl").exists()
+
+
+# --- 4. gate fail -> retry with feedback -> success ---------------------------
+
+
+class TestGateRetrySuccess:
+    async def test_fail_then_pass(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        agent = _agent()
+        plan = _plan(tmp_path, registry, agent, gate_retries=2)
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime(
+            {
+                "*": [
+                    ScriptedResponse(files={"doc.md": "too short"}),  # fails min_length
+                    ScriptedResponse(files={"doc.md": "c" * 30}),  # passes
+                ]
+            }
+        )
+        state = await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        assert state.status is StepStatus.done
+        assert state.outcome is StepOutcome.ok
+        assert state.tries == 2
+
+        attempt1 = plan.workdir / "attempts" / "1"
+        assert (attempt1 / "prompt.md").exists()
+        assert (attempt1 / "gate_report.json").exists()
+        assert (attempt1 / "output" / "doc.md").exists()
+
+        # 2nd attempt's current prompt.md must contain the gate feedback
+        current_prompt = (plan.workdir / "prompt.md").read_text("utf-8")
+        assert "Validation feedback" in current_prompt or "min_length" in current_prompt
+
+
+# --- 5. gate exhausted ---------------------------------------------------------
+
+
+class TestGateExhausted:
+    async def test_all_fail_gate_exhausted(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        agent = _agent()
+        plan = _plan(tmp_path, registry, agent, gate_retries=2)
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime(
+            {"*": [ScriptedResponse(files={"doc.md": "short"})]}  # always fails
+        )
+        state = await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        assert state.status is StepStatus.failed
+        assert state.outcome is StepOutcome.failed_validation
+        assert state.tries == 3
+
+        assert (plan.workdir / "attempts" / "1").exists()
+        assert (plan.workdir / "attempts" / "2").exists()
+        # 3rd (final) attempt stays current — never archived (guards the off-by-one)
+        assert not (plan.workdir / "attempts" / "3").exists()
+        assert (plan.workdir / "gate_report.json").exists()
+
+
+# --- 6. infra retries are a separate counter -----------------------------------
+
+
+class TestInfraRetries:
+    async def test_infra_error_then_success_no_gate_try_consumed(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        agent = _agent()
+        plan = _plan(tmp_path, registry, agent, infra_retries=2)
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime(
+            {
+                "*": [
+                    ScriptedResponse(completed=False),  # infra error
+                    ScriptedResponse(files={"doc.md": "d" * 30}),  # success
+                ]
+            }
+        )
+        state = await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        assert state.status is StepStatus.done
+        assert state.outcome is StepOutcome.ok
+        # infra retry did not consume a gate try
+        assert state.tries == 1
+        assert not (plan.workdir / "attempts").exists()
+
+    async def test_infra_retries_exhausted(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        agent = _agent()
+        plan = _plan(tmp_path, registry, agent, infra_retries=1)
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime({"*": [ScriptedResponse(completed=False)]})
+        state = await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        assert state.status is StepStatus.failed
+        assert state.outcome is StepOutcome.failed_infra
+
+
+# --- 7. timeout -----------------------------------------------------------------
+
+
+class _SleepyRuntime:
+    async def run_step(self, spec: StepSpec, on_event: EventCallback) -> StepResult:
+        await asyncio.sleep(5)
+        return StepResult(completed=True)  # pragma: no cover - never reached
+
+    async def close(self) -> None:
+        return None
+
+
+class TestTimeout:
+    async def test_timeout_marks_step_timeout(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        agent = _agent()
+        plan = _plan(tmp_path, registry, agent, timeout_s=0.01)
+        ledger = _ledger(tmp_path, ["write"])
+        state = await execute_agent_step(
+            plan, _SleepyRuntime(), ledger, sleeper=_no_sleep
+        )
+        assert state.status is StepStatus.failed
+        assert state.outcome is StepOutcome.timeout
+
+
+# --- 8. agent_error --------------------------------------------------------------
+
+
+class TestAgentError:
+    async def test_agent_error_marks_failed_agent(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        agent = _agent()
+        plan = _plan(tmp_path, registry, agent)
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime({"*": [ScriptedResponse(agent_error="boom")]})
+        state = await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        assert state.status is StepStatus.failed
+        assert state.outcome is StepOutcome.failed_agent
+        assert state.error == "boom"
+        assert not (plan.workdir / "output" / "doc.md").exists()
+
+
+# --- 9. HITL question artifact ---------------------------------------------------
+
+
+class TestHITL:
+    def _agent_with_question(self) -> AgentSpec:
+        return _agent(
+            produces=[
+                {"port": "doc", "type": "requirements@v1"},
+                {"port": "clarification", "type": "question@v1", "optional": True},
+            ]
+        )
+
+    async def test_valid_question_artifact_marks_failed_agent(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        agent = self._agent_with_question()
+        plan = _plan(tmp_path, registry, agent)
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime(
+            {
+                "*": [
+                    ScriptedResponse(
+                        files={
+                            "doc.md": "e" * 30,
+                            "clarification.json": json.dumps({"question": "?"}),
+                        }
+                    )
+                ]
+            }
+        )
+        state = await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        assert state.status is StepStatus.failed
+        assert state.outcome is StepOutcome.failed_agent
+        assert state.error is not None
+        assert "interactive" in state.error.lower()
+
+    async def test_without_question_file_passes(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        agent = self._agent_with_question()
+        plan = _plan(tmp_path, registry, agent)
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime({"*": [ScriptedResponse(files={"doc.md": "f" * 30})]})
+        state = await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        assert state.status is StepStatus.done
+        assert state.outcome is StepOutcome.ok
+
+
+# --- 10. ledger integration: running -> terminal, timestamps, events -------------
+
+
+class TestLedgerIntegration:
+    async def test_running_then_terminal_with_timestamps_and_events(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        agent = _agent()
+        plan = _plan(tmp_path, registry, agent)
+        ledger = _ledger(tmp_path, ["write"])
+        events: list[dict] = []
+        runtime = MockRuntime({"*": [ScriptedResponse(files={"doc.md": "g" * 30})]})
+
+        clock = _clock_seq()
+        state = await execute_agent_step(
+            plan,
+            runtime,
+            ledger,
+            on_event=events.append,
+            clock=clock,
+            sleeper=_no_sleep,
+        )
+
+        assert state.started_at is not None
+        assert state.finished_at is not None
+        assert state.started_at != state.finished_at
+
+        step_events = [e for e in events if e["type"] == "step_state_changed"]
+        assert step_events[0]["payload"]["to"] == "running"
+        assert step_events[-1]["payload"]["to"] == "done"
+        assert step_events[-1]["payload"]["outcome"] == "ok"
