@@ -533,8 +533,28 @@ async def run_pipeline(
         set_node(node_id, NodeStatus.failed, error=step.error)
         return NodeStatus.failed
 
-    pending = set(nodes)
+    # Seed from the ledger so resume continues rather than re-running (SPEC §10.5).
+    # A fresh run has every node ``pending`` (Ledger.create), so this is a no-op
+    # there; on resume, already-``done``/``reused`` nodes are pre-resolved and
+    # skipped, ``failed``/``skipped`` nodes stay terminal (``--retry-failed`` flips
+    # them back to ``pending`` in the ledger before this runs), and a node left
+    # ``pending`` (incl. crash-recovered ``running → pending``) is re-executed —
+    # a map node then reuses its already-``done`` element steps (§10.3).
+    _TERMINAL = {
+        NodeStatus.done: NodeStatus.done,
+        NodeStatus.reused: NodeStatus.done,
+        NodeStatus.failed: NodeStatus.failed,
+        NodeStatus.skipped: NodeStatus.skipped,
+    }
+    pending: set[str] = set()
     resolved: dict[str, NodeStatus] = {}  # done | failed | skipped
+    for nid in nodes:
+        st = ledger.get_node(nid)
+        mapped = _TERMINAL.get(st.status) if st is not None else None
+        if mapped is None:
+            pending.add(nid)
+        else:
+            resolved[nid] = mapped
     tasks: dict[asyncio.Task[NodeStatus], str] = {}
 
     def ready() -> list[str]:

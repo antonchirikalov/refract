@@ -1,0 +1,13 @@
+name: demo_writer
+version: 1
+description: >
+  Reads one source document and writes a small requirements markdown file.
+  Used by examples/demo-project as a smoke agent — mapped over the scanned
+  source collection.
+consumes:
+  - { port: source, type: source@v1 }
+produces:
+  - { port: requirements, type: requirements@v1 }
+needs: [read, edit]
+defaults:
+  timeout_s: 600

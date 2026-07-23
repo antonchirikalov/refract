@@ -1,0 +1,5 @@
+Project Alpha — Notes
+
+Alpha is a small internal tool for tracking library book loans. Staff need to
+register a loan when a book leaves the shelf, mark it returned, and see which
+books are currently out. Overdue loans (more than 14 days) should be flagged.

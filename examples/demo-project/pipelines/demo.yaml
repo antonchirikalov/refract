@@ -1,0 +1,13 @@
+version: "0.1"
+name: demo
+nodes:
+  - id: scan
+    type: builtin/scanner
+
+  - id: write
+    type: agent
+    agent: demo_writer@1
+    map: "scan.sources"
+    inputs: {}
+    params:
+      workers: 2

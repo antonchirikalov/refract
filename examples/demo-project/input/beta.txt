@@ -1,0 +1,5 @@
+Project Beta — Notes
+
+Beta is a kiosk sign-in app for a coworking space. A visitor types their name
+and the host they are meeting; the app prints a badge and notifies the host by
+email. Visitors already signed in today should be offered a quick re-check-in.
