@@ -112,6 +112,22 @@ def test_package_hash_uses_posix_relative_paths(tmp_path: Path) -> None:
     assert package_hash(pkg) == package_hash(pkg2)
 
 
+def test_package_hash_case_differing_names_is_platform_stable(tmp_path: Path) -> None:
+    """Lines are sorted by ASCII bytes, not case-insensitive Path order (SPEC §9).
+
+    'B' (66) sorts before 'a' (97), so the digest is fixed regardless of the
+    host filesystem's Path comparison rules (Windows case-folds, POSIX does not).
+    """
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "B.txt").write_text("b", encoding="utf-8")
+    (pkg / "a.txt").write_text("a", encoding="utf-8")
+
+    assert package_hash(pkg) == (
+        "sha256:9ba2530e8ceb2c25ca9c9d5f2063808c8ce3abfe39d4bbc5f9ea60f06416303f"
+    )
+
+
 # --- resolve_model -------------------------------------------------------------
 
 

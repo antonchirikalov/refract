@@ -50,10 +50,14 @@ def _file_sha256(path: Path) -> str:
 def package_hash(pkg_dir: Path | str) -> str:
     """sha256 of sorted ``"<relpath>:<sha256(file)>"`` lines (SPEC §9)."""
     pkg_dir = Path(pkg_dir)
-    lines: list[str] = []
-    for path in sorted(p for p in pkg_dir.rglob("*") if p.is_file()):
-        rel = path.relative_to(pkg_dir).as_posix()
-        lines.append(f"{rel}:{_file_sha256(path)}")
+    # Sort the RENDERED lines (ASCII byte order), not the Path objects: Path
+    # comparison is case-insensitive on Windows but case-sensitive on POSIX,
+    # which would make the digest platform-dependent (SPEC §9 hashes sorted lines).
+    lines = sorted(
+        f"{p.relative_to(pkg_dir).as_posix()}:{_file_sha256(p)}"
+        for p in pkg_dir.rglob("*")
+        if p.is_file()
+    )
     digest = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
