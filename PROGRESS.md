@@ -32,7 +32,7 @@ closes an item. Phase table from SPEC §17.
 | §13 | builtin/scanner | remaining |
 | §10.2 | steps: single lifecycle (gate retries+feedback, attempts, outcomes, timeout, infra retries) | done |
 | §9 | state ledger (nodes+steps, atomic write, crash recovery, retry-failed) | done |
-| §9 | snapshot | remaining |
+| §9 | snapshot | done |
 | §10.1/§10.4 | artifacts: link_or_copy, materialization, gate | done |
 | §11 | prompt assembly (jinja2 templates) | done |
 | §12 | runtime base (protocol, StepSpec/StepResult) + MockRuntime | done |
