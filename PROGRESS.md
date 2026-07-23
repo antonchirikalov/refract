@@ -27,7 +27,7 @@ closes an item. Phase table from SPEC §17.
 | §5 | registry (artifact types + builtin types, rules, edge compat, slugify) | done |
 | §8 | graph load + validator (all §8.3 codes) + toposort | done |
 | §13 | builtin registry metadata (ports/params; run deferred) | done |
-| §10.5 | scheduler (no loop/select) | remaining |
+| §10.5 | scheduler (no loop/select) | done |
 | §10.3 | map (+aggregation, provider semaphores) | remaining |
 | §13 | builtin/scanner | remaining |
 | §10.2 | steps: single lifecycle (gate retries+feedback, attempts, outcomes, timeout, infra retries) | done |
