@@ -33,6 +33,7 @@ closes an item. Phase table from SPEC §17.
 | §10.2 | steps: single lifecycle (gate retries+feedback, attempts, outcomes, timeout, infra retries) | done |
 | §9 | state ledger (nodes+steps, atomic write, crash recovery, retry-failed) | done |
 | §9 | snapshot | done |
+| §9 | events.jsonl writer (single writer, seq, append-only) | done |
 | §10.1/§10.4 | artifacts: link_or_copy, materialization, gate | done |
 | §11 | prompt assembly (jinja2 templates) | done |
 | §12 | runtime base (protocol, StepSpec/StepResult) + MockRuntime | done |
@@ -40,5 +41,5 @@ closes an item. Phase table from SPEC §17.
 | §14 | CLI (validate/run/status/resume) | remaining |
 | §4 | examples/demo-project | remaining |
 | §17 | migrate source_processor + requirements_writer | remaining |
-| §18 | Phase 0 tests | remaining |
+| §18 | Phase 0 tests | in progress (models/registry/graph/steps/state/snapshot/scheduler/events/scanner covered; map/CLI remaining) |
 
