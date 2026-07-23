@@ -3,29 +3,33 @@
 A node is ready when all nodes sourcing its inputs (including binding deps) are
 done/reused. Ready nodes run concurrently under per-provider semaphores.
 
-Phase 0 scope: plain ``agent`` nodes (one step each). Meta-nodes (loop/select),
-map fan-out, and builtin nodes are separate items (SPEC §10.3, §13) and raise a
-clear ``NotImplementedError`` here until their lifecycles land — they all reuse
-``steps.execute_agent_step`` and plug into this same ready-set loop.
+Phase 0 scope: plain ``agent`` nodes (one step each) and ``builtin`` nodes
+(e.g. scanner, deterministic, no runner). A plain agent may consume a whole
+collection; producing one is map's job. Meta-nodes (loop/select) and map fan-out
+are separate items (SPEC §10.3) and are rejected up front with a clear
+``NotImplementedError`` until their lifecycles land.
 """
 
 from __future__ import annotations
 
 import asyncio
+import shutil
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from refract.artifacts import artifact_path
+from refract.builtins import BUILTINS
 from refract.events import EventWriter, utcnow_iso
 from refract.graph import DataRef, parse_ref
 from refract.models.agent import AgentSpec
-from refract.models.ledger import NodeStatus, RunStatus, StepOutcome
-from refract.models.pipeline import AgentNode, Pipeline
+from refract.models.ledger import NodeStatus, RunStatus, StepOutcome, StepStatus
+from refract.models.pipeline import AgentNode, BuiltinNode, Pipeline
 from refract.registry import ArtifactRegistry
 from refract.runtime.base import AgentRuntime
 from refract.state import Ledger
 from refract.steps import (
     AgentStepPlan,
+    CollectionInput,
     DirAnyInput,
     FileInput,
     InputSpec,
@@ -75,10 +79,10 @@ def _build_inputs(
         producer_out = _step_output_dir(run_dir, ref.node_id)
         ptype = consume_type[port]
         if ptype.startswith("collection<"):
-            # produced only by map/builtin nodes — deferred (SPEC §10.3/§13)
-            raise NotImplementedError(
-                f"collection input {port!r} on {node.id}: map/builtin not implemented"
-            )
+            # a plain agent may consume a whole collection (I6 forbids producing
+            # one, not consuming). The producer wrote it under output/<producer_port>/.
+            specs.append(CollectionInput(port=port, src=producer_out / ref.port))
+            continue
         rtype = registry.get(ptype)
         if rtype is None:
             raise KeyError(f"unknown type {ptype!r} for input {port!r} on {node.id}")
@@ -137,6 +141,7 @@ async def run_pipeline(
     ledger: Ledger,
     events: EventWriter,
     provider_limits: dict[str, int] | None = None,
+    project_input_dir: Path | str | None = None,
     clock: Callable[[], str] = utcnow_iso,
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> RunStatus:
@@ -147,12 +152,19 @@ async def run_pipeline(
     deps = node_dependencies(pipeline)
 
     # Reject unsupported node kinds up front so scheduling never starts a run it
-    # cannot finish cleanly (I10). loop/select/map/builtin are separate items.
+    # cannot finish cleanly (I10). Supported: plain agent nodes + builtin/scanner.
+    # map fan-out and loop/select meta-nodes are separate items (SPEC §10.3).
     for nid, node in nodes.items():
-        if not isinstance(node, AgentNode) or node.map is not None:
+        supported_agent = isinstance(node, AgentNode) and node.map is None
+        supported_builtin = (
+            isinstance(node, BuiltinNode)
+            and BUILTINS.get(node.builtin_name) is not None
+            and BUILTINS[node.builtin_name].run is not None
+        )
+        if not (supported_agent or supported_builtin):
             raise NotImplementedError(
-                f"node {nid!r}: only plain agent nodes are implemented "
-                "(SPEC §10.3/§13: map/loop/select/builtin not yet)"
+                f"node {nid!r}: unsupported node kind in Phase 0 "
+                "(SPEC §10.3: map/loop/select not yet)"
             )
     semaphores: dict[str, asyncio.Semaphore] = {}
 
@@ -186,8 +198,93 @@ async def run_pipeline(
             }
         )
 
+    async def run_builtin(node: BuiltinNode) -> NodeStatus:
+        """Execute a builtin node: deterministic, no runner, ledger + outputs only (I9)."""
+        bdef = BUILTINS[node.builtin_name]
+        assert bdef.run is not None
+        params = bdef.params_model.model_validate(node.params)
+        port = bdef.produces[0].port
+        input_override = getattr(params, "input", None)
+        input_dir = (
+            Path(input_override)
+            if input_override
+            else Path(project_input_dir)
+            if project_input_dir is not None
+            else run_dir / "input"
+        )
+        workdir = run_dir / "steps" / node.id / "main"
+        output = workdir / "output"
+        # Re-execution never overwrites in place (SPEC §10.2): rebuild output from
+        # scratch so a resumed/re-run builtin is idempotent and never merges into a
+        # partial prior run (crash recovery flips running→pending, then re-runs).
+        if output.exists():
+            shutil.rmtree(output)
+        output.mkdir(parents=True, exist_ok=True)
+        set_node(node.id, NodeStatus.running)
+        started = clock()
+        ledger.set_step(
+            node.id,
+            node=node.id,
+            status=StepStatus.running,
+            tries=0,
+            started_at=started,
+        )
+        emit_event(
+            {
+                "type": "step_state_changed",
+                "step_id": node.id,
+                "payload": {"from": "pending", "to": "running"},
+            }
+        )
+        try:
+            bdef.run(params=params, input_dir=input_dir, output_dir=output, port=port)
+        except OSError as exc:
+            ledger.set_step(
+                node.id,
+                node=node.id,
+                status=StepStatus.failed,
+                outcome=StepOutcome.failed_infra,
+                tries=1,
+                started_at=started,
+                finished_at=clock(),
+                error=str(exc),
+            )
+            emit_event(
+                {
+                    "type": "step_state_changed",
+                    "step_id": node.id,
+                    "payload": {
+                        "from": "running",
+                        "to": "failed",
+                        "outcome": "failed_infra",
+                    },
+                }
+            )
+            set_node(node.id, NodeStatus.failed, error=str(exc))
+            return NodeStatus.failed
+        ledger.set_step(
+            node.id,
+            node=node.id,
+            status=StepStatus.done,
+            outcome=StepOutcome.ok,
+            tries=1,
+            started_at=started,
+            finished_at=clock(),
+        )
+        emit_event(
+            {
+                "type": "step_state_changed",
+                "step_id": node.id,
+                "payload": {"from": "running", "to": "done", "outcome": "ok"},
+            }
+        )
+        set_node(node.id, NodeStatus.done)
+        return NodeStatus.done
+
     async def run_node(node_id: str) -> NodeStatus:
         node = nodes[node_id]
+        if isinstance(node, BuiltinNode):
+            return await run_builtin(node)
         assert isinstance(node, AgentNode)  # guaranteed by the up-front check
         plan = _agent_plan(node, run_dir=run_dir, agents=agents, registry=registry)
         async with semaphore_for(plan.model):

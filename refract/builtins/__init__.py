@@ -8,28 +8,35 @@ task; ``None`` means "not yet executable".
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pydantic import BaseModel
 
 from refract.builtins.scanner import ScannerParams
+from refract.builtins.scanner import run as scanner_run
 from refract.models.agent import Port
 
 
 @dataclass(frozen=True)
 class BuiltinDef:
-    """A builtin node definition (SPEC §13)."""
+    """A builtin node definition (SPEC §13).
+
+    ``run`` is a deterministic, synchronous callable invoked by the scheduler as
+    ``run(params=<params_model instance>, input_dir=..., output_dir=..., port=...)``
+    and returns the produced artifact/manifest. ``None`` means "not yet executable".
+    """
 
     params_model: type[BaseModel]
     produces: list[Port]
-    run: Callable[..., Awaitable[None]] | None = None
+    run: Callable[..., object] | None = None
 
 
 BUILTINS: dict[str, BuiltinDef] = {
     "scanner": BuiltinDef(
         params_model=ScannerParams,
         produces=[Port(port="sources", type="collection<source@v1>")],
+        run=scanner_run,
     ),
 }
 

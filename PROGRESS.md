@@ -29,7 +29,7 @@ closes an item. Phase table from SPEC §17.
 | §13 | builtin registry metadata (ports/params; run deferred) | done |
 | §10.5 | scheduler (no loop/select) | done |
 | §10.3 | map (+aggregation, provider semaphores) | remaining |
-| §13 | builtin/scanner | remaining |
+| §13 | builtin/scanner | done |
 | §10.2 | steps: single lifecycle (gate retries+feedback, attempts, outcomes, timeout, infra retries) | done |
 | §9 | state ledger (nodes+steps, atomic write, crash recovery, retry-failed) | done |
 | §9 | snapshot | done |
