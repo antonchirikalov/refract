@@ -269,9 +269,7 @@ nodes:
         runtime = MockRuntime(
             {
                 "summarize": [
-                    ScriptedResponse(
-                        files={"doc.md": "# Requirements:\nsummary body."}
-                    )
+                    ScriptedResponse(files={"doc.md": "# Requirements:\nsummary body."})
                 ]
             }
         )
@@ -294,7 +292,13 @@ nodes:
         assert ledger.get_node("summarize").status is NodeStatus.done
 
         scan_manifest_path = (
-            run_dir / "steps" / "scan" / "main" / "output" / "sources" / "_collection.json"
+            run_dir
+            / "steps"
+            / "scan"
+            / "main"
+            / "output"
+            / "sources"
+            / "_collection.json"
         )
         assert scan_manifest_path.exists()
         scan_manifest = CollectionManifest.model_validate(
@@ -344,7 +348,13 @@ nodes:
         runtime = MockRuntime({"scan": [ScriptedResponse()]})  # never used
 
         manifest_path = (
-            run_dir / "steps" / "scan" / "main" / "output" / "sources" / "_collection.json"
+            run_dir
+            / "steps"
+            / "scan"
+            / "main"
+            / "output"
+            / "sources"
+            / "_collection.json"
         )
 
         for _ in range(2):  # second pass simulates resume/re-exec on same run_dir

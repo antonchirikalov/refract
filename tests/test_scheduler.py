@@ -267,7 +267,9 @@ nodes:
         run_dir = tmp_path / "run"
         registry = write_registry(tmp_path)
 
-        z_agent = agent_spec("z_agent", produces=[{"port": "out", "type": "extract@v1"}])
+        z_agent = agent_spec(
+            "z_agent", produces=[{"port": "out", "type": "extract@v1"}]
+        )
         m_agent = agent_spec(
             "m_agent",
             consumes=[{"port": "in", "type": "extract@v1"}],

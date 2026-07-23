@@ -796,7 +796,9 @@ nodes:
 
 
 class TestWSecurity:
-    def test_risky_capability_reachable_from_scanner_warns(self, tmp_path: Path) -> None:
+    def test_risky_capability_reachable_from_scanner_warns(
+        self, tmp_path: Path
+    ) -> None:
         agents = {
             "bashy_agent@1": agent_spec(
                 "bashy_agent",

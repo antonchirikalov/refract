@@ -31,7 +31,9 @@ def write_registry(tmp_path: Path) -> ArtifactRegistry:
     """Build a standard registry (source/extract/requirements/design_doc) under tmp_path."""
     types_dir = tmp_path / "types"
     types_dir.mkdir(parents=True, exist_ok=True)
-    (types_dir / "artifact_types.yaml").write_text(STANDARD_TYPES_YAML, encoding="utf-8")
+    (types_dir / "artifact_types.yaml").write_text(
+        STANDARD_TYPES_YAML, encoding="utf-8"
+    )
     schema_dir = types_dir / "schemas"
     schema_dir.mkdir(parents=True, exist_ok=True)
     (schema_dir / "extract.schema.json").write_text(
@@ -81,8 +83,7 @@ def standard_agents() -> dict[str, AgentSpec]:
         produces=[{"port": "verdict", "type": "verdict@v1"}],
     )
     return {
-        s.ref: s
-        for s in (source_processor, requirements_writer, requirements_critic)
+        s.ref: s for s in (source_processor, requirements_writer, requirements_critic)
     }
 
 

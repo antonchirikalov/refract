@@ -44,12 +44,16 @@ async def test_writes_output_raw_and_events(tmp_path: Path) -> None:
 
     assert result.completed is True
     assert result.agent_error is None
-    assert (spec.workdir / "output" / "extract.json").read_text("utf-8") == '{"ok": true}'
+    assert (spec.workdir / "output" / "extract.json").read_text(
+        "utf-8"
+    ) == '{"ok": true}'
     assert (spec.workdir / "raw.txt").exists()
     events_file = spec.workdir / "agent.events.jsonl"
     assert events_file.exists()
     # emitted events match the persisted jsonl
-    persisted = [json.loads(line) for line in events_file.read_text("utf-8").splitlines()]
+    persisted = [
+        json.loads(line) for line in events_file.read_text("utf-8").splitlines()
+    ]
     assert persisted == events
 
 
@@ -110,4 +114,6 @@ async def test_bytes_and_nested_paths(tmp_path: Path) -> None:
     )
     spec = _spec(tmp_path / "wd")
     await runtime.run_step(spec, lambda e: None)
-    assert (spec.workdir / "output" / "sub" / "dir" / "x.bin").read_bytes() == b"\x00\x01"
+    assert (
+        spec.workdir / "output" / "sub" / "dir" / "x.bin"
+    ).read_bytes() == b"\x00\x01"

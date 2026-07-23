@@ -126,7 +126,9 @@ class TestArtifactNaming:
         assert rtype is not None
         assert artifact_filename("source", rtype) == "source"
 
-    def test_artifact_path_joins_base_dir(self, tmp_path: Path, registry: ArtifactRegistry) -> None:
+    def test_artifact_path_joins_base_dir(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
         rtype = registry.get("extract@v1")
         assert rtype is not None
         p = artifact_path(tmp_path / "output", "extract", rtype)
@@ -205,7 +207,9 @@ class TestMaterializeCollection:
 
         assert port_dir == input_root / "extracts"
         assert (port_dir / "_collection.json").exists()
-        assert (port_dir / "rfp-doc" / "extract.json").read_text(encoding="utf-8") == '{"value": 1}'
+        assert (port_dir / "rfp-doc" / "extract.json").read_text(
+            encoding="utf-8"
+        ) == '{"value": 1}'
 
 
 class TestMaterializeMapItem:
@@ -219,7 +223,9 @@ class TestMaterializeMapItem:
         assert (port_dir / "rfp.pdf").read_text(encoding="utf-8") == "pdf-bytes"
         item_json_path = port_dir / "_item.json"
         assert item_json_path.exists()
-        round_tripped = ItemInfo.model_validate_json(item_json_path.read_text(encoding="utf-8"))
+        round_tripped = ItemInfo.model_validate_json(
+            item_json_path.read_text(encoding="utf-8")
+        )
         assert round_tripped == item
 
     def test_dir_payload_plus_item_json(self, tmp_path: Path) -> None:
@@ -241,7 +247,9 @@ class TestMaterializeMapItem:
 
 
 class TestGate:
-    def test_missing_output_not_ok(self, tmp_path: Path, registry: ArtifactRegistry) -> None:
+    def test_missing_output_not_ok(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
         rtype = registry.get("extract@v1")
         assert rtype is not None
         output_dir = tmp_path / "output"
@@ -250,7 +258,9 @@ class TestGate:
         assert result.ok is False
         assert any("missing" in p for p in result.problems)
 
-    def test_invalid_json_not_ok(self, tmp_path: Path, registry: ArtifactRegistry) -> None:
+    def test_invalid_json_not_ok(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
         rtype = registry.get("extract@v1")
         assert rtype is not None
         output_dir = tmp_path / "output"
@@ -285,7 +295,9 @@ class TestGate:
         assert result.ok is True
         assert result.problems == []
 
-    def test_rules_fail_when_unmet(self, tmp_path: Path, registry: ArtifactRegistry) -> None:
+    def test_rules_fail_when_unmet(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
         rtype = registry.get("requirements@v1")
         assert rtype is not None
         output_dir = tmp_path / "output"
@@ -295,7 +307,9 @@ class TestGate:
         assert result.ok is False
         assert len(result.problems) >= 1
 
-    def test_rules_ok_when_met(self, tmp_path: Path, registry: ArtifactRegistry) -> None:
+    def test_rules_ok_when_met(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
         rtype = registry.get("requirements@v1")
         assert rtype is not None
         output_dir = tmp_path / "output"
@@ -343,7 +357,9 @@ class TestGate:
         assert report.ok is False
         assert report.ports[0].ok is False
 
-    def test_write_gate_report_round_trips(self, tmp_path: Path, registry: ArtifactRegistry) -> None:
+    def test_write_gate_report_round_trips(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
         extract_rtype = registry.get("extract@v1")
         assert extract_rtype is not None
         output_dir = tmp_path / "output"

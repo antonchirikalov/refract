@@ -182,7 +182,9 @@ class TestCollectionInput:
     def test_small_collection_fully_inlined(
         self, tmp_path: Path, registry: ArtifactRegistry
     ) -> None:
-        agent = _agent(consumes=[{"port": "extracts", "type": "collection<extract@v1>"}])
+        agent = _agent(
+            consumes=[{"port": "extracts", "type": "collection<extract@v1>"}]
+        )
         workdir = tmp_path / "step"
         input_dir = workdir / "input" / "extracts"
         input_dir.mkdir(parents=True)
@@ -197,7 +199,9 @@ class TestCollectionInput:
     def test_large_collection_not_fully_inlined(
         self, tmp_path: Path, registry: ArtifactRegistry
     ) -> None:
-        agent = _agent(consumes=[{"port": "extracts", "type": "collection<extract@v1>"}])
+        agent = _agent(
+            consumes=[{"port": "extracts", "type": "collection<extract@v1>"}]
+        )
         workdir = tmp_path / "step"
         input_dir = workdir / "input" / "extracts"
         input_dir.mkdir(parents=True)

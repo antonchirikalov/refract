@@ -16,6 +16,7 @@ from refract.snapshot import (
     resolve_model,
     used_agent_refs,
 )
+
 PIPELINE_YAML = """
 version: "0.1"
 name: extract
@@ -49,7 +50,9 @@ nodes:
 """
 
 
-def _write_agent_package(root: Path, name: str, *, prompt: str = "Do the thing.") -> Path:
+def _write_agent_package(
+    root: Path, name: str, *, prompt: str = "Do the thing."
+) -> Path:
     """Create a minimal on-disk agent package under <root>/agents/<name>/."""
     pkg = root / "agents" / name
     pkg.mkdir(parents=True, exist_ok=True)
@@ -207,9 +210,7 @@ def test_build_resolved_fills_timeout_from_agent_default() -> None:
         )
     }
 
-    resolved = build_resolved(
-        pipeline, agents=agents, overrides={}, default_model=None
-    )
+    resolved = build_resolved(pipeline, agents=agents, overrides={}, default_model=None)
     node = next(n for n in resolved["nodes"] if n["id"] == "extract")
     assert node["params"]["timeout_s"] == 120
 
@@ -240,9 +241,7 @@ nodes:
         )
     }
 
-    resolved = build_resolved(
-        pipeline, agents=agents, overrides={}, default_model=None
-    )
+    resolved = build_resolved(pipeline, agents=agents, overrides={}, default_model=None)
     node = next(n for n in resolved["nodes"] if n["id"] == "extract")
     assert node["params"]["timeout_s"] == 999
 
