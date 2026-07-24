@@ -13,7 +13,5 @@ types:
   # Architecture-probe report: workshop-ready discovery questions grounded in
   # the source material (spectra arch_probe). Markdown document.
   arch_report@v1: { kind: file, format: markdown }
-  # Generated publication illustrations + a regeneration manifest (spectra illustrator).
-  illustration@v1: { kind: dir }
   # Publish confirmation: page URL/id/version, attachment counts (spectra confluence_publisher).
   publication@v1: { kind: file, format: json }

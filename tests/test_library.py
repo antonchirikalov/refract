@@ -17,7 +17,6 @@ LIBRARY = Path(__file__).resolve().parents[1] / "library"
 _MIGRATED_AGENTS = {
     "arch_probe@1",
     "arch_critic@1",
-    "illustrator@1",
     "confluence_publisher@1",
 }
 
