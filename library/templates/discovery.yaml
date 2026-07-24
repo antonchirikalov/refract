@@ -1,6 +1,8 @@
 version: "0.1"
 name: discovery
 
+# Discovery mode (spectra): build requirements, then generate client discovery
+# questions — arch_probe drafts them, arch_critic curates the final report.
 nodes:
   - id: scan
     type: builtin/scanner
@@ -15,9 +17,19 @@ nodes:
     type: loop
     params: { max_rounds: 3, model: "kimi/kimi-k3" }
     body:
-      agent: discovery_writer@1
+      agent: requirements_writer@1
       inputs: { extracts: extract.extract }
     critic:
-      agent: discovery_critic@1
+      agent: requirements_critic@1
       inputs: { draft: "@body" }
-    outputs: { report: "@body" }
+    outputs: { doc: "@body" }
+
+  - id: probe
+    type: agent
+    agent: arch_probe@1
+    inputs: { requirements: refine.doc }
+
+  - id: discover
+    type: agent
+    agent: arch_critic@1
+    inputs: { draft: probe.arch_report }

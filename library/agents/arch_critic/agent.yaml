@@ -1,14 +1,14 @@
 name: arch_critic
 version: 1
 description: >
-  Reviews an architecture-probe report and emits a verdict@v1. The critic of the
-  architecture refine loop: it rejects generic or already-answered questions and
-  approves only a report whose probes demonstrate close reading and would move a
-  real design decision.
+  Reviews an architecture-probe report and writes the final discovery report:
+  drops generic or already-answered questions, keeps only probes that show close
+  reading and would move a real design decision, and organizes them into a
+  workshop-ready discovery document (spectra's arch_critic).
 consumes:
   - { port: draft, type: arch_report@v1 }
 produces:
-  - { port: verdict, type: verdict@v1 }
+  - { port: report, type: discovery_report@v1 }
 needs: [read, edit]
 defaults:
   timeout_s: 1800

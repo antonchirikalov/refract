@@ -70,8 +70,10 @@ _SCENARIOS: dict[str, dict[str, dict[str, str]]] = {
     },
     "discovery": {
         "extract:*": {"extract.json": _EXTRACT},
-        "refine.body:*": {"report.md": _REPORT},
+        "refine.body:*": {"requirements.md": _REQ},
         "refine.critic:*": {"verdict.json": _APPROVED},
+        "probe": {"arch_report.md": "# Probes\n- What is the SLA target?\n"},
+        "discover": {"report.md": _REPORT},
     },
     "solution_design": {
         "extract:*": {"extract.json": _EXTRACT},
