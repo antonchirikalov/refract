@@ -43,13 +43,17 @@ from refract.cli import (
     resolve_project,
     resume_impl,
     run_impl,
+    write_answer,
 )
 from refract.events import EVENTS_FILENAME, utcnow_iso
 from refract.graph import load_agents, load_pipeline
 from refract.models.ledger import RunState
 from refract.registry import ArtifactRegistry
 
-_TERMINAL = {"completed", "failed", "cancelled"}
+# Statuses at which no further events flow until the client acts — the WS closes.
+# waiting_human is "paused for an answer", not truly finished, but no events come
+# until a resume, so the events socket closes on it too.
+_TERMINAL = {"completed", "failed", "cancelled", "waiting_human"}
 
 
 # --- request / response models ----------------------------------------------
@@ -79,6 +83,11 @@ class StartRunRequest(BaseModel):
 
 class StartRunResponse(BaseModel):
     run_id: str
+
+
+class AnswerRequest(BaseModel):
+    step_id: str
+    answer: str
 
 
 class PipelineText(BaseModel):
@@ -395,8 +404,37 @@ def create_app(
         return {"run_id": run_id}
 
     @api.post("/api/runs/{run_id}/answers")
-    def answer_run(run_id: str) -> None:
-        raise HTTPException(status_code=501, detail="answers not implemented (phase 3)")
+    async def answer_run(run_id: str, req: AnswerRequest) -> dict[str, str]:
+        run_dir = _find_run_dir(run_id)
+        try:
+            write_answer(run_dir, req.step_id, req.answer)
+        except UsageError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        rec = st.runs.get(run_id) or RunRecord(
+            run_dir=run_dir, project_id=run_dir.parent.parent.name
+        )
+        st.runs[run_id] = rec
+
+        async def _launch() -> None:
+            try:
+                status = await asyncio.to_thread(
+                    resume_impl,
+                    run_dir,
+                    app=st.app_config,
+                    runtime_factory=st.runtime_factory,
+                    clock=st.clock,
+                )
+                rec.status = status.value
+            except asyncio.CancelledError:
+                rec.status = "cancelled"
+                raise
+            except Exception as e:  # noqa: BLE001
+                rec.status = "failed"
+                rec.error = str(e)
+
+        rec.status = "running"
+        rec.task = asyncio.create_task(_launch())
+        return {"run_id": run_id}
 
     # --- models + fs ---------------------------------------------------------
 

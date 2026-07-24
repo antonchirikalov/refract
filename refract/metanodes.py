@@ -103,7 +103,7 @@ async def _run_step(ctx: MetaContext, plan: AgentStepPlan) -> StepState:
     if existing is not None and existing.status is StepStatus.done:
         return existing
     async with ctx.semaphore_for(plan.model):
-        return await execute_agent_step(
+        step = await execute_agent_step(
             plan,
             ctx.runtime,
             ctx.ledger,
@@ -111,6 +111,12 @@ async def _run_step(ctx: MetaContext, plan: AgentStepPlan) -> StepState:
             clock=ctx.clock,
             sleeper=ctx.sleeper,
         )
+    if step.status is StepStatus.waiting_human:
+        raise NotImplementedError(
+            f"HITL (question@v1) inside a loop/select block is not supported "
+            f"({plan.step_id}); use a plain agent node for interactive steps."
+        )
+    return step
 
 
 def _port_input(

@@ -133,13 +133,18 @@ def _gate_ports(agent: AgentSpec, registry: ArtifactRegistry) -> list[GatePort]:
     return ports
 
 
-def _has_valid_question(
+def _read_question(
     agent: AgentSpec, registry: ArtifactRegistry, output_dir: Path
-) -> bool:
-    """HITL detection (SPEC §10.2 step 4): a valid question@v1 artifact present."""
+) -> dict[str, object] | None:
+    """The agent's valid ``question@v1`` HITL artifact, if it produced one (§10.2/§16.9).
+
+    Returns the parsed question data (the control decision comes only from this
+    typed artifact — I4), or None when there is no valid question on the single
+    optional HITL port.
+    """
     qtype = registry.get(_QUESTION_TYPE)
     if qtype is None:
-        return False
+        return None
     for p in agent.produces:
         if not (p.optional and p.type == _QUESTION_TYPE):
             continue
@@ -150,10 +155,9 @@ def _has_valid_question(
             data = json.loads(path.read_text("utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        # validate_json returns a list of problems; empty means the artifact is valid
-        if qtype.validate_json(data) == []:
-            return True
-    return False
+        if qtype.validate_json(data) == [] and isinstance(data, dict):
+            return data
+    return None
 
 
 def _format_feedback(report: GateReport) -> str:
@@ -196,6 +200,15 @@ def _archive_attempt(workdir: Path, n: int) -> None:
     output = workdir / "output"
     if output.exists():
         shutil.move(str(output), str(dest / "output"))
+
+
+def _next_attempt(workdir: Path) -> int:
+    """Smallest free ``attempts/<n>`` index (1-based)."""
+    attempts = workdir / "attempts"
+    n = 1
+    while (attempts / str(n)).exists():
+        n += 1
+    return n
 
 
 def _system_prompt(agent_dir: Path) -> str:
@@ -273,6 +286,67 @@ async def execute_agent_step(
         assert step is not None
         return step
 
+    # --- HITL (SPEC §10.2 step 4 / §16.9) ---
+    # An answer supplied by a human (via `refract answer` / the API) lands at
+    # hitl/answer.json before the step is re-run; fold it into the prompt so the
+    # agent proceeds instead of re-asking. The prior (question) attempt is archived.
+    hitl_dir = workdir / "hitl"
+    answer_path = hitl_dir / "answer.json"
+    question_path = hitl_dir / "question.json"
+    hitl_context: str | None = None
+    if answer_path.exists():
+        try:
+            answer = json.loads(answer_path.read_text("utf-8")).get("answer", "")
+            prior_q = (
+                json.loads(question_path.read_text("utf-8")).get("question", "")
+                if question_path.exists()
+                else ""
+            )
+            hitl_context = (
+                "## Human clarification\n"
+                f"Earlier you asked: {prior_q}\n"
+                f"The human answered: {answer}\n"
+                "Use this answer and produce the required output now — do not ask "
+                "again unless genuinely still blocked."
+            )
+        except (OSError, json.JSONDecodeError):
+            hitl_context = None
+        if output_dir.exists() and any(output_dir.iterdir()):
+            _archive_attempt(workdir, _next_attempt(workdir))
+            output_dir.mkdir(parents=True, exist_ok=True)
+        answer_path.unlink(missing_ok=True)  # consumed for this turn
+
+    def finish_waiting(question: dict[str, object], *, tries: int) -> StepState:
+        hitl_dir.mkdir(parents=True, exist_ok=True)
+        question_path.write_text(
+            json.dumps(question, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        ledger.set_step(
+            plan.step_id,
+            node=plan.node_id,
+            status=StepStatus.waiting_human,
+            outcome=None,
+            tries=tries,
+            started_at=started_at,
+        )
+        emit(
+            {
+                "type": "step_state_changed",
+                "step_id": plan.step_id,
+                "payload": {"from": "running", "to": "waiting_human"},
+            }
+        )
+        emit(
+            {
+                "type": "question",
+                "step_id": plan.step_id,
+                "payload": {"question": question.get("question", "")},
+            }
+        )
+        step = ledger.get_step(plan.step_id)
+        assert step is not None
+        return step
+
     # tries counts COMPLETED gate attempts; timeout/failed_infra report the
     # count reached before the terminal failure (0 if it never completed a run).
     tries = 0
@@ -289,6 +363,8 @@ async def execute_agent_step(
             revision=plan.revision,
             gate_feedback=gate_feedback,
         )
+        if hitl_context is not None:
+            task_prompt = f"{task_prompt}\n{hitl_context}\n"
         full_prompt = (
             f"{system_prompt}\n\n{task_prompt}" if system_prompt else task_prompt
         )
@@ -323,13 +399,10 @@ async def execute_agent_step(
                 StepOutcome.failed_agent, tries=tries, error=result.agent_error
             )
 
-        # step 4: HITL not supported in phases 0–2
-        if _has_valid_question(plan.agent, plan.registry, output_dir):
-            return finish(
-                StepOutcome.failed_agent,
-                tries=tries,
-                error="interactive not supported yet",
-            )
+        # step 4: HITL — a valid question@v1 pauses the step for a human (§16.9).
+        question = _read_question(plan.agent, plan.registry, output_dir)
+        if question is not None:
+            return finish_waiting(question, tries=tries)
 
         # step 5: gate (schema + rules), then any step-specific extra validation
         report = run_gate(output_dir, gate_ports)

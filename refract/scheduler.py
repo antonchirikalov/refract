@@ -734,6 +734,11 @@ async def run_pipeline(
                     clock=clock,
                     sleeper=sleeper,
                 )
+            if step.status is StepStatus.waiting_human:
+                raise NotImplementedError(
+                    f"HITL (question@v1) inside a map node is not supported "
+                    f"({step_id}); use a plain agent node for interactive steps."
+                )
             results[item.slug] = step.outcome or StepOutcome.failed_infra
 
         ok_items = [i for i in manifest.items if i.status is CollectionStatus.ok]
@@ -795,6 +800,11 @@ async def run_pipeline(
                     on_event=emit_event,
                     clock=clock,
                     sleeper=sleeper,
+                )
+            if step.status is StepStatus.waiting_human:
+                raise NotImplementedError(
+                    f"HITL (question@v1) inside a map_over node is not supported "
+                    f"({step_id})."
                 )
             results[slug] = step.outcome or StepOutcome.failed_infra
 
@@ -902,6 +912,9 @@ async def run_pipeline(
                 clock=clock,
                 sleeper=sleeper,
             )
+        if step.status is StepStatus.waiting_human:
+            set_node(node.id, NodeStatus.waiting_human)
+            return NodeStatus.waiting_human
         if step.outcome is StepOutcome.ok:
             set_node(node.id, NodeStatus.done)
             return NodeStatus.done
@@ -984,9 +997,18 @@ async def run_pipeline(
         )
         raise
 
-    failed = any(s is NodeStatus.failed for s in resolved.values())
-    status = RunStatus.failed if failed else RunStatus.completed
-    ledger.set_run_status(status, finished_at=clock())
+    # Terminal status (§9): failed wins; else if any node is parked for a human the
+    # run is waiting_human (paused, resumable via an answer — no finished_at); else
+    # completed.
+    if any(s is NodeStatus.failed for s in resolved.values()):
+        status = RunStatus.failed
+    elif any(s is NodeStatus.waiting_human for s in resolved.values()):
+        status = RunStatus.waiting_human
+    else:
+        status = RunStatus.completed
+    ledger.set_run_status(
+        status, finished_at=None if status is RunStatus.waiting_human else clock()
+    )
     events.emit(
         {
             "type": "run_state_changed",

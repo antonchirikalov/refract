@@ -486,30 +486,69 @@ class TestHITL:
             ]
         )
 
-    async def test_valid_question_artifact_marks_failed_agent(
+    async def test_valid_question_pauses_for_human(
         self, tmp_path: Path, registry: ArtifactRegistry
     ) -> None:
+        # SPEC §16.9 (phase 3): a valid question@v1 parks the step waiting_human,
+        # persists the question, and emits a `question` event.
         agent = self._agent_with_question()
         plan = _plan(tmp_path, registry, agent)
         ledger = _ledger(tmp_path, ["write"])
+        events: list[dict] = []
         runtime = MockRuntime(
             {
                 "*": [
                     ScriptedResponse(
                         files={
-                            "doc.md": "e" * 30,
-                            "clarification.json": json.dumps({"question": "?"}),
+                            "clarification.json": json.dumps({"question": "which db?"})
                         }
                     )
                 ]
             }
         )
-        state = await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+        state = await execute_agent_step(
+            plan, runtime, ledger, on_event=events.append, sleeper=_no_sleep
+        )
 
-        assert state.status is StepStatus.failed
-        assert state.outcome is StepOutcome.failed_agent
-        assert state.error is not None
-        assert "interactive" in state.error.lower()
+        assert state.status is StepStatus.waiting_human
+        assert state.outcome is None
+        assert (plan.workdir / "hitl" / "question.json").exists()
+        assert any(e["type"] == "question" for e in events)
+
+    async def test_answer_lets_the_step_proceed(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        # After a human answer lands at hitl/answer.json, re-running the step folds
+        # the answer into the prompt and the agent produces the real output.
+        agent = self._agent_with_question()
+        plan = _plan(tmp_path, registry, agent)
+        ledger = _ledger(tmp_path, ["write"])
+        # turn 1: the agent asks a question -> waiting_human
+        asking = MockRuntime(
+            {
+                "*": [
+                    ScriptedResponse(
+                        files={"clarification.json": json.dumps({"question": "?"})}
+                    )
+                ]
+            }
+        )
+        s1 = await execute_agent_step(plan, asking, ledger, sleeper=_no_sleep)
+        assert s1.status is StepStatus.waiting_human
+
+        # human answers, then the step is re-run
+        (plan.workdir / "hitl" / "answer.json").write_text(
+            json.dumps({"answer": "use Postgres"}), encoding="utf-8"
+        )
+        answering = MockRuntime(
+            {"*": [ScriptedResponse(files={"doc.md": "# ok\n" + "z" * 40})]}
+        )
+        s2 = await execute_agent_step(plan, answering, ledger, sleeper=_no_sleep)
+        assert s2.status is StepStatus.done
+        assert s2.outcome is StepOutcome.ok
+        # the answer was consumed and the prior (question) attempt archived
+        assert not (plan.workdir / "hitl" / "answer.json").exists()
+        assert (plan.workdir / "attempts" / "1").is_dir()
 
     async def test_without_question_file_passes(
         self, tmp_path: Path, registry: ArtifactRegistry

@@ -28,7 +28,13 @@ from refract.events import EventWriter, utcnow_iso
 from refract.graph import ValidationContext, load_agents, load_pipeline
 from refract.models.agent import AgentSpec
 from refract.models.config import McpFile, ProjectConfig, ProvidersFile
-from refract.models.ledger import NodeStatus, RunState, RunStatus, StepStatus
+from refract.models.ledger import (
+    NodeStatus,
+    RunState,
+    RunStatus,
+    StepState,
+    StepStatus,
+)
 from refract.models.pipeline import AgentNode, Pipeline
 from refract.registry import ArtifactRegistry
 from refract.runtime.base import AgentRuntime
@@ -493,6 +499,44 @@ def rerun_impl(
 # --- resume ------------------------------------------------------------------
 
 
+def write_answer(run_dir: Path | str, step_id: str, answer: str) -> None:
+    """Drop a human answer@v1 at the waiting step's ``hitl/answer.json`` (§16.9).
+
+    The next resume folds it into that step's prompt so the agent proceeds.
+    """
+    run_dir = Path(run_dir)
+    node_id, _, leaf = step_id.partition(":")
+    step = ledger_step(run_dir, step_id)
+    if step is None or step.status is not StepStatus.waiting_human:
+        raise UsageError(f"step {step_id!r} is not waiting for a human answer")
+    hitl = run_dir / "steps" / node_id / (leaf or "main") / "hitl"
+    hitl.mkdir(parents=True, exist_ok=True)
+    (hitl / "answer.json").write_text(
+        json.dumps({"answer": answer}, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def ledger_step(run_dir: Path, step_id: str) -> StepState | None:
+    state = RunState.model_validate(
+        json.loads((run_dir / "state.json").read_text("utf-8"))
+    )
+    return state.steps.get(step_id)
+
+
+def answer_impl(
+    run_dir: Path | str,
+    *,
+    step_id: str,
+    answer: str,
+    app: AppConfig,
+    runtime_factory: RuntimeFactory = _default_runtime_factory,
+    clock: Callable[[], str] = utcnow_iso,
+) -> RunStatus:
+    """Supply a human answer to a waiting step, then resume the run (§16.9)."""
+    write_answer(run_dir, step_id, answer)
+    return resume_impl(run_dir, app=app, runtime_factory=runtime_factory, clock=clock)
+
+
 def resume_impl(
     run_dir: Path | str,
     *,
@@ -778,6 +822,23 @@ def resume(
             app=load_app_config(),
             retry_failed=retry_failed,
             force_step=force_step,
+        )
+        return EXIT_OK if status_ is RunStatus.completed else EXIT_RUN_FAILED
+
+    _run_cli(body)
+
+
+@app.command()
+def answer(
+    run_dir: Path = typer.Argument(..., help="run directory"),
+    step_id: str = typer.Argument(..., help="the waiting step id"),
+    text: str = typer.Argument(..., help="the human answer"),
+) -> None:
+    """Answer a step that is waiting for a human, then resume the run (§16.9)."""
+
+    def body() -> int:
+        status_ = answer_impl(
+            run_dir, step_id=step_id, answer=text, app=load_app_config()
         )
         return EXIT_OK if status_ is RunStatus.completed else EXIT_RUN_FAILED
 
