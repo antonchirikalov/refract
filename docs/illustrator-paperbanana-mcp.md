@@ -17,19 +17,35 @@ point. You only register the server in `~/.refract/mcp.yaml`.
 ```yaml
 servers:
   paperbanana:
-    command: ["uvx", "--from", "paperbanana[mcp]", "paperbanana-mcp"]
-    env: {}   # see keys below — prefer inheriting from the run env, not inlining
+    # NOTE the [openai] extra — without it paperbanana lacks the `openai` module
+    # and falls back to Gemini (then demands GOOGLE_API_KEY).
+    command: ["uvx", "--from", "paperbanana[mcp,openai]", "paperbanana-mcp"]
+    env:
+      # opencode launches the MCP subprocess with ONLY this declared environment
+      # (it does not forward the whole parent env), so pass the key explicitly.
+      # `{env:VAR}` is resolved by opencode from the run env — the literal secret
+      # is never written to the file (I8).
+      OPENAI_API_KEY: "{env:OPENAI_API_KEY}"
+      # paperbanana's default model names are Gemini's, which 404 against OpenAI.
+      # Pin real OpenAI models (verified working): VLM gpt-4o, image gpt-image-1.
+      OPENAI_VLM_MODEL: "gpt-4o"
+      OPENAI_IMAGE_MODEL: "gpt-image-1"
 ```
 
-**Keys (I8):** the paperbanana MCP's default image backend is Gemini and it
-**requires `GOOGLE_API_KEY`** (observed at runtime: with only `OPENAI_API_KEY`
-set, `generate_diagram` fails with "missing API key … obtain a Google API key").
-To use the OpenAI image backend instead, configure paperbanana's provider via its
-own env (e.g. `OPENAI_BASE_URL` and related overrides — see the paperbanana repo)
-in the `env:` block below. Do NOT inline secret values — refract runs the step
-with the run-level env and the stdio MCP server inherits it, so exporting the
-right key in the run environment is enough; reference an env var if you must set
-one under `env:`.
+Also select the OpenAI providers in paperbanana's own config (`config.yaml`:
+`vlm.provider: openai`, `image.provider: openai_imagen`) — its default provider is
+the free Gemini tier.
+
+**Keys (I8):** paperbanana runs on `OPENAI_API_KEY` once the `[openai]` extra is
+installed and OpenAI models are pinned. Verified directly (CLI, `--vlm-provider
+openai --vlm-model gpt-4o --image-provider openai_imagen --image-model
+gpt-image-1`): it ran its retriever→planner→stylist→visualizer→critic loop and
+produced real PNGs (~2 MB, 2 iterations, ≈$0.12/figure). The key reaches the MCP
+subprocess only via the `{env:OPENAI_API_KEY}` placeholder above (the literal is
+never written to disk). Pitfalls that cost us a few runs: (1) omitting `[openai]`
+→ `ModuleNotFoundError: openai` → silent Gemini fallback → "get a Google API key";
+(2) leaving default model names → 404 (`gemini-2.5-flash`/`gpt-image-1.5` don't
+exist on OpenAI) — pin `gpt-4o` / `gpt-image-1`.
 
 ## Tools the server exposes (illustrator uses these)
 
