@@ -188,6 +188,54 @@ def _model_ref(model: str) -> dict[str, str]:
     return {"providerID": provider, "modelID": model_id}
 
 
+def _events_from_parts(
+    step_id: str, parts: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """Turn an opencode message's parts into trace events (I9 / SPEC §9).
+
+    Tool parts become ``tool_call`` events (so the real tool invocations show up
+    in events.jsonl and agent.events.jsonl); text/reasoning become ``log`` events.
+    Robust to unknown part shapes — never raises.
+    """
+    events: list[dict[str, object]] = []
+    for part in parts:
+        ptype = part.get("type") if isinstance(part, dict) else None
+        if ptype == "tool":
+            raw_state = part.get("state")
+            state = raw_state if isinstance(raw_state, dict) else {}
+            events.append(
+                {
+                    "type": "tool_call",
+                    "step_id": step_id,
+                    "payload": {
+                        "tool": part.get("tool") or part.get("name") or "?",
+                        "summary": str(state.get("status") or state.get("title") or "")[
+                            :200
+                        ],
+                    },
+                }
+            )
+        elif ptype in ("text", "reasoning"):
+            snippet = str(part.get("text", ""))[:500]
+            if snippet:
+                events.append(
+                    {
+                        "type": "log",
+                        "step_id": step_id,
+                        "payload": {"level": "info", "message": f"[{ptype}] {snippet}"},
+                    }
+                )
+    if not events:
+        events.append(
+            {
+                "type": "log",
+                "step_id": step_id,
+                "payload": {"level": "info", "message": "opencode message complete"},
+            }
+        )
+    return events
+
+
 class OpencodeRuntime:
     """Real opencode adapter (SPEC §12).
 
@@ -264,18 +312,15 @@ class OpencodeRuntime:
                 body = resp.json()
                 # 1.18.x message response: {info: {error?, cost, tokens, ...}, parts}
                 info = body.get("info", {})
+                parts = body.get("parts", [])
                 text = "".join(
-                    p.get("text", "")
-                    for p in body.get("parts", [])
-                    if p.get("type") == "text"
+                    p.get("text", "") for p in parts if p.get("type") == "text"
                 )
-                agent_events = [
-                    {
-                        "type": "log",
-                        "step_id": spec.step_id,
-                        "message": "opencode message complete",
-                    }
-                ]
+                # Record the real turn parts (tool calls, reasoning, text) for I9
+                # instead of a stub, and surface tool calls as events (§9).
+                agent_events = _events_from_parts(spec.step_id, parts)
+                for tool_call in (e for e in agent_events if e["type"] == "tool_call"):
+                    on_event(tool_call)
                 self._write_trace(spec, text, agent_events)
                 error = info.get("error")
                 return StepResult(
