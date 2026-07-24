@@ -857,17 +857,40 @@ async def run_pipeline(
         resolve_model=lambda m: resolve_model(m, ledger),
     )
 
+    def _confirm_needs(agent_ref: str) -> list[str]:
+        """Confirm-required capabilities of an agent, sorted (empty if none)."""
+        return sorted(c for c in agents[agent_ref].needs if c in confirm_caps)
+
+    def _guard_confirm_unsupported(
+        node: Node, agent_refs: list[str], kind: str
+    ) -> None:
+        """Confirmation is only wired for plain agent nodes; never silently skip it
+        (SPEC §16.9). If a confirm-required agent appears in a fan-out/meta context,
+        fail loudly instead of running it unconfirmed."""
+        needs = sorted({c for a in agent_refs for c in _confirm_needs(a)})
+        if needs:
+            raise NotImplementedError(
+                f"capability confirmation for {needs} is not supported inside a "
+                f"{kind} node ({node.id}); use a plain agent node for confirmed steps."
+            )
+
     async def _execute_node(node: Node) -> NodeStatus:
         if isinstance(node, BuiltinNode):
             return await run_builtin(node)
         if isinstance(node, LoopNode):
+            _guard_confirm_unsupported(
+                node, [node.body.agent, node.critic.agent], "loop"
+            )
             return await run_loop(node, meta_ctx)
         if isinstance(node, SelectNode):
+            _guard_confirm_unsupported(node, [node.selector.agent], "select")
             return await run_select(node, meta_ctx)
         assert isinstance(node, AgentNode)  # guaranteed by the up-front check
         if node.map is not None:
+            _guard_confirm_unsupported(node, [node.agent], "map")
             return await run_map_node(node)
         if node.map_over is not None:
+            _guard_confirm_unsupported(node, [node.agent], "map_over")
             return await run_map_over_node(node)
         return await _run_plain_agent(node)
 
@@ -895,16 +918,38 @@ async def run_pipeline(
         return status
 
     async def _run_plain_agent(node: AgentNode) -> NodeStatus:
-        # Capability confirmation (SPEC §17 phase 3): pause for a human to approve
-        # sensitive capabilities before the agent runs. Reuses the HITL pause —
-        # `refract answer <run> <node> <text>` writes the approval and resume proceeds.
-        need_confirm = sorted(c for c in agents[node.agent].needs if c in confirm_caps)
+        # Capability confirmation (SPEC §7/§16.9): pause for a human to approve
+        # sensitive capabilities before the agent runs. This is a pre-execution
+        # node-level gate (before input materialization), so it sets waiting_human
+        # directly rather than through the per-attempt step lifecycle. The decision
+        # is a structured record (`confirm/decision.json` with an explicit
+        # ``approved`` boolean) written by `refract answer` — never a free-text
+        # marker (I4). A rejected request fails the node.
+        need_confirm = _confirm_needs(node.agent)
         if need_confirm:
             wd = run_dir / "steps" / node.id / "main"
-            approved = wd / "confirm" / "approved.json"
-            if not approved.exists():
+            decision = wd / "confirm" / "decision.json"
+            if decision.exists():
+                rec = json.loads(decision.read_text(encoding="utf-8"))
+                if not rec.get("approved", False):
+                    set_node(
+                        node.id,
+                        NodeStatus.failed,
+                        error=f"capabilities {need_confirm} rejected by human",
+                    )
+                    return NodeStatus.failed
+            else:
                 (wd / "confirm").mkdir(parents=True, exist_ok=True)
-                (wd / "confirm" / "pending").write_text("1", encoding="utf-8")
+                (wd / "confirm" / "request.json").write_text(
+                    json.dumps(
+                        {
+                            "node": node.id,
+                            "agent": node.agent,
+                            "capabilities": need_confirm,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
                 q = (
                     f"Approve capabilities {need_confirm} for agent "
                     f"{node.agent} at node {node.id}?"

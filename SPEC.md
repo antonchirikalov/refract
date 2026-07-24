@@ -240,7 +240,15 @@ version: "0.1"
 name: "Atlas RFP"
 input: ./input
 defaults: { model: kimi/kimi-k3 }
+# capability confirmation policy (phase 3, §16.10) — optional
+confirm: [bash]            # explicit capabilities that require human approval
+confirm_tier: dangerous    # and/or every capability at/above this tier
 ```
+
+> CHANGED (2026-07-25): added optional `confirm` / `confirm_tier` to `project.yaml`.
+> SPEC §17 phase 3 named "тиры capabilities, подтверждения" without mechanics; the
+> design is specified here and in §16.10. `confirm` lists capability names; `confirm_tier`
+> is a threshold in the risk order `safe < moderate < dangerous` (see §16.10).
 
 Конфиг приложения `~/.refract/`:
 
@@ -638,6 +646,37 @@ WS   /api/runs/{run_id}/events?from_seq=N
 8. Управляющие типы — встроенные, неизменяемые (`E_RESERVED_TYPE`).
 9. HITL-порт — максимум один, тип question@v1 (`E_HITL_SHAPE`); исполнение — фаза 3, до неё `question.json` в выходе → `failed/failed_agent`.
 
+### 16.10 Подтверждение sensitive capabilities (фаза 3)
+
+> CHANGED (2026-07-25): раздел добавлен. §17 фаза 3 назвала «тиры capabilities,
+> подтверждения» без механики — механика специфицирована здесь.
+
+**Тиры риска.** Каждая capability имеет тир в порядке `safe < moderate < dangerous`:
+`read`, `vision` → safe; `edit`, `webfetch`, `mcp:<server>` → moderate; `bash` → dangerous.
+Неизвестная capability → moderate.
+
+**Политика.** `project.yaml` может задавать `confirm` (явный список capabilities) и/или
+`confirm_tier` (порог). Confirm-набор рана = `confirm` ∪ {все capabilities на/выше
+`confirm_tier`, которые нужны используемым в пайплайне агентам}.
+
+**Механика (переиспользует HITL-паузу).** Это pre-execution гейт на уровне ноды, ДО
+материализации входов, поэтому статус `waiting_human` выставляется напрямую, а не через
+per-attempt lifecycle шага (§10.2). Для plain agent-ноды, чей агент нуждается в
+capability из confirm-набора:
+- при первом запуске движок пишет `steps/<node>/main/confirm/request.json`
+  (`{node, agent, capabilities}`), выставляет шаг/ноду в `waiting_human`, эмитит событие
+  `question`, и возвращает управление;
+- `refract answer <run> <node> <text>` (или API `/answers`) интерпретирует ответ:
+  утвердительный (`approve`/`yes`/`ok`/`да`/…) → `confirm/decision.json`
+  `{approved: true, answer}`, иначе `{approved: false, answer}`;
+- на resume: если `decision.approved` — гейт пропускается и агент исполняется один раз
+  (идемпотентно, `confirm/` не архивируется в `attempts/`); если `approved: false` —
+  нода становится `failed`. Решение движка берётся из явного булева `approved`, а не из
+  наличия/парсинга текста (совместимо с I4).
+
+Подтверждение реализовано только для plain agent-нод. Confirm-требующий агент внутри
+`map`/`map_over`/`loop`/`select` → `NotImplementedError` (политика НЕ обходится молча).
+
 ## 17. Фазировка и критерии приёмки
 
 **Фаза 0**: pyproject+scaffolding, PROGRESS.md, models, registry (+builtin-типы), graph+
@@ -658,7 +697,8 @@ docs/opencode-smoke.md.
 пересчитан только он и низ графа».
 
 **Фаза 2**: api/ + WS; фронт — отдельная UI-спека. **Фаза 3**: HITL, тиры capabilities,
-подтверждения. **Фаза 4**: патч-операции графа, каталог для билдер-LLM (вне этой спеки).
+подтверждения (механика — §16.10). **Фаза 4**: патч-операции графа, каталог для
+билдер-LLM (вне этой спеки).
 
 > DESIGN NOTE (2026-07-23, не реализовано): discovery-источник. Новый архетип входной
 > ноды (условно `type: discover`) — второй легальный производитель `collection<X>` «из

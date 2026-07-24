@@ -510,6 +510,11 @@ def rerun_impl(
 # --- resume ------------------------------------------------------------------
 
 
+# Affirmative answers that approve a capability confirmation; anything else
+# (incl. "no"/"reject") rejects it and fails the node.
+_AFFIRMATIVE = frozenset({"approve", "approved", "yes", "y", "ok", "okay", "да", "ок"})
+
+
 def write_answer(run_dir: Path | str, step_id: str, answer: str) -> None:
     """Drop a human answer@v1 at the waiting step's ``hitl/answer.json`` (§16.9).
 
@@ -521,12 +526,13 @@ def write_answer(run_dir: Path | str, step_id: str, answer: str) -> None:
     if step is None or step.status is not StepStatus.waiting_human:
         raise UsageError(f"step {step_id!r} is not waiting for a human answer")
     wd = run_dir / "steps" / node_id / (leaf or "main")
-    pending = wd / "confirm" / "pending"
-    if pending.exists():  # a capability confirmation, not an agent question
-        (wd / "confirm" / "approved.json").write_text(
-            json.dumps({"answer": answer}, ensure_ascii=False), encoding="utf-8"
+    request = wd / "confirm" / "request.json"
+    if request.exists():  # a capability confirmation, not an agent question
+        approved = answer.strip().casefold() in _AFFIRMATIVE
+        (wd / "confirm" / "decision.json").write_text(
+            json.dumps({"approved": approved, "answer": answer}, ensure_ascii=False),
+            encoding="utf-8",
         )
-        pending.unlink(missing_ok=True)
         return
     hitl = wd / "hitl"
     hitl.mkdir(parents=True, exist_ok=True)
