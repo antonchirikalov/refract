@@ -1,0 +1,15 @@
+name: illustrator
+version: 1
+description: >
+  Creates publication-ready illustrations for a solution design. Plans the figures
+  the document needs, generates each one through the paperbanana MCP server, and
+  emits a directory of images plus a manifest recording each figure's caption and
+  regeneration prompt. Image generation is an MCP tool (mcp:paperbanana), not a
+  local script — see docs/illustrator-paperbanana-mcp.md.
+consumes:
+  - { port: design_doc, type: design_doc@v1 }
+produces:
+  - { port: illustration, type: illustration@v1 }
+needs: [read, edit, "mcp:paperbanana"]
+defaults:
+  timeout_s: 1800
