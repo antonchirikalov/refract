@@ -1,77 +1,48 @@
 # illustrator → paperbanana MCP server
 
 The `illustrator` agent (`library/agents/illustrator`) generates figures by calling
-an MCP tool, declared as `needs: [read, edit, "mcp:paperbanana"]`. This keeps the
-run reproducible and workdir-confined (I1): the agent never shells out to a local
-script — it calls a tool, exactly like `arch_probe` → `tavily-remote` or
-`confluence_publisher` → `mcp-atlassian`.
+the **published** paperbanana MCP server — no wrapper to write. It declares
+`needs: [read, edit, "mcp:paperbanana"]`, which keeps the run reproducible and
+workdir-confined (I1): the agent calls MCP tools, exactly like `arch_probe` →
+`tavily-remote` or `confluence_publisher` → `mcp-atlassian`.
 
 **refract needs zero engine changes for this** — MCP is the built-in extension
-point. You only (1) build the server as a **separate project**, (2) register it in
-`~/.refract/mcp.yaml`, (3) keep the agent's `needs` as-is.
+point. You only register the server in `~/.refract/mcp.yaml`.
 
-## 1. Register the server (`~/.refract/mcp.yaml`)
+- Catalog: https://mcpservers.org/servers/llmsresearch/paperbanana
+- Source: https://github.com/llmsresearch/paperbanana
+
+## Register the server (`~/.refract/mcp.yaml`)
 
 ```yaml
 servers:
   paperbanana:
-    command: ["python", "-m", "paperbanana_mcp"]   # however your server launches
-    env: {}                                          # e.g. { OPENAI_API_KEY_ENV_ALREADY_IN_RUN_ENV }
+    command: ["uvx", "--from", "paperbanana[mcp]", "paperbanana-mcp"]
+    env: {}   # see keys below — prefer inheriting from the run env, not inlining
 ```
 
-refract passes the run env down (I8: provider keys + used agents' MCP tokens); put
-any secret the server needs behind an env var, never inline it here.
+**Keys (I8):** paperbanana needs `GOOGLE_API_KEY` (Gemini image/VLM) and/or
+`OPENAI_API_KEY`. Do NOT inline the value here. refract runs the step with the
+run-level env (union of snapshot provider keys + used agents' MCP tokens), and the
+stdio server inherits it — so having the key exported in the run environment is
+enough. Only add it under `env:` if you must override, and even then reference an
+env var rather than a literal secret.
 
-## 2. Tool contract the agent expects
+## Tools the server exposes (illustrator uses these)
 
-The agent calls one tool per figure and writes the result into its own `output/`
-(so all files stay inside the step workdir — I1). Return the image as data, not a
-path, so the server's filesystem is irrelevant to the agent:
+`generate_diagram`, `generate_plot`, `continue_diagram`, `continue_plot`,
+`evaluate_diagram`, `evaluate_plot`, `orchestrate_figures`, `batch_diagrams`,
+`batch_plots`, `continue_run`, `download_references`.
 
-```
-tool: generate_illustration
-  input:  { "prompt": string, "style": string (optional) }
-  output: { "png_base64": string, "revised_prompt": string }
-```
+The agent uses `generate_diagram` (architecture/flow figures), `generate_plot`
+(data charts), and `continue_*` for revisions. Tools save the image to a path
+(`outputs/run_<ts>/final_output.png`) and return it; the agent reads that file and
+copies it into its own `output/fig-<n>.png` so all artifacts stay in the step
+workdir.
 
-The agent decodes `png_base64` → `output/fig-<n>.png` and records `revised_prompt`
-in `output/manifest.json`. (If you prefer the server to return several candidates,
-return an array and let the agent pick — but keep one call per figure.)
+## What lives outside refract
 
-## 3. Starter skeleton (goes in YOUR separate repo, not in refract)
-
-Minimal stdio MCP server wrapping paperbanana. This is a starting point — wire the
-actual paperbanana pipeline (planner → stylist → visualizer → critic) inside
-`generate_illustration`.
-
-```python
-# paperbanana_mcp/__main__.py  — separate project; deps: mcp, paperbanana
-import base64
-from mcp.server.fastmcp import FastMCP
-
-app = FastMCP("paperbanana")
-
-
-@app.tool()
-def generate_illustration(prompt: str, style: str = "") -> dict:
-    """Generate one publication figure and return it as base64 PNG."""
-    # from paperbanana import generate  # your real call
-    # png_bytes, revised = generate(prompt=prompt, style=style, provider="openai")
-    png_bytes, revised = b"", prompt  # <-- replace with paperbanana
-    return {
-        "png_base64": base64.b64encode(png_bytes).decode("ascii"),
-        "revised_prompt": revised,
-    }
-
-
-if __name__ == "__main__":
-    app.run()  # stdio transport
-```
-
-## What still lives outside refract
-
-The server's runtime deps — the `paperbanana` package, its image-API key, and the
-`~/.cache/paperbanana/` reference dataset — must exist wherever the MCP server
-runs. MCP relocates that heavy dependency behind a clean interface; it does not
-remove it. That's the intended tradeoff (reproducible, isolated agent; infra lives
-in its own project).
+The paperbanana package, its image-model API key, and the reference dataset live
+wherever the MCP server process runs (`uvx` fetches the package on first use).
+That's the intended split: reproducible, isolated agent in refract; the heavy
+image-gen dependency in its own published server.
