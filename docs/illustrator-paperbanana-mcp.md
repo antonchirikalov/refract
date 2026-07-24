@@ -27,9 +27,10 @@ servers:
       # is never written to the file (I8).
       OPENAI_API_KEY: "{env:OPENAI_API_KEY}"
       # paperbanana's default model names are Gemini's, which 404 against OpenAI.
-      # Pin real OpenAI models (verified working): VLM gpt-4o, image gpt-image-1.
-      OPENAI_VLM_MODEL: "gpt-4o"
-      OPENAI_IMAGE_MODEL: "gpt-image-1"
+      # Pin the models spectra uses (verified working here): VLM gpt-5.2, image
+      # gpt-image-2.
+      OPENAI_VLM_MODEL: "gpt-5.2"
+      OPENAI_IMAGE_MODEL: "gpt-image-2"
 ```
 
 Also select the OpenAI providers in paperbanana's own config (`config.yaml`:
@@ -38,9 +39,10 @@ the free Gemini tier.
 
 **Keys (I8):** paperbanana runs on `OPENAI_API_KEY` once the `[openai]` extra is
 installed and OpenAI models are pinned. Verified directly (CLI, `--vlm-provider
-openai --vlm-model gpt-4o --image-provider openai_imagen --image-model
-gpt-image-1`): it ran its retriever→planner→stylist→visualizer→critic loop and
-produced real PNGs (~2 MB, 2 iterations, ≈$0.12/figure). The key reaches the MCP
+openai --vlm-model gpt-5.2 --image-provider openai_imagen --image-model
+gpt-image-2` — the models spectra uses): it ran its
+retriever→planner→stylist→visualizer→critic loop and produced real PNGs
+(~1.4 MB, multiple critic iterations). The key reaches the MCP
 subprocess only via the `{env:OPENAI_API_KEY}` placeholder above (the literal is
 never written to disk). Pitfalls that cost us a few runs: (1) omitting `[openai]`
 → `ModuleNotFoundError: openai` → silent Gemini fallback → "get a Google API key";
