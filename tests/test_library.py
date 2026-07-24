@@ -13,14 +13,12 @@ from refract.registry import ArtifactRegistry, parse_type_ref
 
 LIBRARY = Path(__file__).resolve().parents[1] / "library"
 
-# The 6 spectra agents migrated as refract-native packages (SPEC §6/§17).
+# The spectra agents migrated as refract-native packages (SPEC §6/§17).
 _MIGRATED_AGENTS = {
     "arch_probe@1",
     "arch_critic@1",
-    "effort_estimator@1",
     "illustrator@1",
     "confluence_publisher@1",
-    "word_form_builder@1",
 }
 
 

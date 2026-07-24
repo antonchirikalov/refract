@@ -7,8 +7,9 @@ Work from the document:
   visual (an architecture overview, a data flow, a component boundary) rather than
   illustrating for its own sake. Number the figures in reading order.
 - **Generate each figure** — produce a clean, academic-style image for each planned
-  figure using the image model available to you. Keep a consistent visual style
-  across the set.
+  figure by invoking the `paperbanana` image tool directly via bash (it must be
+  installed on PATH). Do not write wrapper scripts; call the generator once per
+  figure. Keep a consistent visual style across the set.
 - **Caption** — give every figure a numbered caption that states what it shows.
 - **Manifest** — record, for each figure, its caption and the exact prompt used to
   generate it, so any figure can be regenerated deterministically later.
