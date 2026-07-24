@@ -25,6 +25,7 @@ from refract.artifacts import (
     GatePort,
     GateReport,
     artifact_path,
+    link_or_copy,
     materialize_collection,
     materialize_dir_or_any,
     materialize_file,
@@ -73,7 +74,19 @@ class MapItemInput:
     item: ItemInfo
 
 
-InputSpec = FileInput | DirAnyInput | CollectionInput | MapItemInput
+@dataclass(frozen=True)
+class AuxFileInput:
+    """A file placed at ``input/<rel_path>`` verbatim (SPEC §10.3 loop revision).
+
+    Used for the engine-injected ``_previous/<port>.<ext>`` and
+    ``_verdict/verdict.json`` a loop body sees from round ≥ 2 (I1: relative only).
+    """
+
+    rel_path: str
+    src: Path
+
+
+InputSpec = FileInput | DirAnyInput | CollectionInput | MapItemInput | AuxFileInput
 
 
 @dataclass
@@ -92,6 +105,10 @@ class AgentStepPlan:
     gate_retries: int = 2
     infra_retries: int = 2
     revision: RevisionContext | None = None
+    # Extra semantic validation of ``output/`` beyond the schema gate; returns a
+    # list of problems (empty = pass). Feeds the same gate-retry loop. Used by
+    # select to require ``selection.winner`` ∈ ok-slugs (SPEC §10.3).
+    extra_gate: Callable[[Path], list[str]] | None = None
 
 
 # --- helpers ----------------------------------------------------------------
@@ -159,6 +176,10 @@ def _materialize(inputs: list[InputSpec], input_root: Path) -> None:
             materialize_collection(spec.src, input_root, spec.port)
         elif isinstance(spec, MapItemInput):
             materialize_map_item(spec.src, input_root, spec.port, spec.item)
+        elif isinstance(spec, AuxFileInput):
+            dst = input_root / spec.rel_path
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            link_or_copy(spec.src, dst)
 
 
 def _archive_attempt(workdir: Path, n: int) -> None:
@@ -310,18 +331,16 @@ async def execute_agent_step(
                 error="interactive not supported yet",
             )
 
-        # step 5: gate
+        # step 5: gate (schema + rules), then any step-specific extra validation
         report = run_gate(output_dir, gate_ports)
         write_gate_report(workdir, report)
-        if report.ok:
+        extra = plan.extra_gate(output_dir) if (report.ok and plan.extra_gate) else []
+        if report.ok and not extra:
             return finish(StepOutcome.ok, tries=tries)
+        feedback = "\n".join(filter(None, [_format_feedback(report), "\n".join(extra)]))
         if tries >= plan.gate_retries + 1:
-            return finish(
-                StepOutcome.failed_validation,
-                tries=tries,
-                error=_format_feedback(report),
-            )
-        gate_feedback = _format_feedback(report)
+            return finish(StepOutcome.failed_validation, tries=tries, error=feedback)
+        gate_feedback = feedback
 
 
 async def _run_with_infra_retries(

@@ -25,7 +25,14 @@ from refract.events import EventWriter, utcnow_iso
 from refract.graph import DataRef, parse_ref
 from refract.models.agent import AgentSpec
 from refract.models.ledger import NodeStatus, RunStatus, StepOutcome, StepStatus
-from refract.models.pipeline import AgentNode, BuiltinNode, Node, Pipeline
+from refract.models.pipeline import (
+    AgentNode,
+    BuiltinNode,
+    LoopNode,
+    Node,
+    Pipeline,
+    SelectNode,
+)
 from refract.models.types import (
     CollectionItem,
     CollectionManifest,
@@ -35,6 +42,7 @@ from refract.models.types import (
 )
 from refract.registry import ArtifactRegistry, ResolvedType, make_collection
 from refract.runtime.base import AgentRuntime
+from refract.metanodes import MetaContext, run_loop, run_select
 from refract.state import Ledger
 from refract.steps import (
     AgentStepPlan,
@@ -56,15 +64,24 @@ def node_dependencies(pipeline: Pipeline) -> dict[str, set[str]]:
     """Map each node id to the set of node ids feeding its inputs (SPEC §10.5)."""
     ids = {n.id for n in pipeline.nodes}
     deps: dict[str, set[str]] = {n.id: set() for n in pipeline.nodes}
+
+    def add(node_id: str, ref_s: str) -> None:
+        ref = parse_ref(ref_s)
+        if isinstance(ref, DataRef) and ref.node_id in ids:
+            deps[node_id].add(ref.node_id)
+
     for node in pipeline.nodes:
         if isinstance(node, AgentNode):
-            refs = list(node.inputs.values())
+            for ref_s in node.inputs.values():
+                add(node.id, ref_s)
             if node.map is not None:  # the mapped collection is a dependency too
-                refs.append(node.map)
-            for ref_s in refs:
-                ref = parse_ref(ref_s)
-                if isinstance(ref, DataRef) and ref.node_id in ids:
-                    deps[node.id].add(ref.node_id)
+                add(node.id, node.map)
+        elif isinstance(node, LoopNode):
+            # body/critic external inputs (``@body`` refs are loop-internal, skipped)
+            for ref_s in (*node.body.inputs.values(), *node.critic.inputs.values()):
+                add(node.id, ref_s)
+        elif isinstance(node, SelectNode):
+            add(node.id, node.candidates)
     return deps
 
 
@@ -74,32 +91,36 @@ def node_dependencies(pipeline: Pipeline) -> dict[str, set[str]]:
 def _node_output_base(run_dir: Path, node: Node) -> Path:
     """Directory that holds a producer node's port outputs (SPEC §9/§10.3).
 
-    Plain agent/builtin nodes write to ``steps/<id>/main/output/``; a map node
-    assembles its output collection under ``steps/<id>/_out/``.
+    Plain agent/builtin nodes write to ``steps/<id>/main/output/``; map, loop and
+    select nodes assemble their outputs under ``steps/<id>/_out/`` (SPEC §10.3).
     """
+    if isinstance(node, LoopNode | SelectNode):
+        return run_dir / "steps" / node.id / "_out"
     if isinstance(node, AgentNode) and node.map is not None:
         return run_dir / "steps" / node.id / "_out"
     return run_dir / "steps" / node.id / "main" / "output"
 
 
-def _build_inputs(
-    node: AgentNode,
+def resolve_data_inputs(
+    agent: AgentSpec,
+    inputs: dict[str, str],
+    *,
     run_dir: Path,
-    agents: dict[str, AgentSpec],
     registry: ArtifactRegistry,
-    nodes: dict[str, "Node"],
+    nodes: dict[str, Node],
+    where: str,
 ) -> list[InputSpec]:
-    """Resolve a node's non-mapped inputs (``node.inputs``) to materializable specs.
+    """Resolve ``{port: "node.port"}`` DataRefs to materializable specs (§10.1/§10.4).
 
-    The mapped port (for a map node) is bound per-element by the map loop, not here.
+    Shared by plain/map agent nodes and by loop/select sub-blocks. ``@``-refs
+    (``@body`` etc.) are loop-internal and must be resolved by the caller, not here.
     """
-    agent = agents[node.agent]
     consume_type = {p.port: p.type for p in agent.consumes}
     specs: list[InputSpec] = []
-    for port, ref_s in node.inputs.items():
+    for port, ref_s in inputs.items():
         ref = parse_ref(ref_s)
         if not isinstance(ref, DataRef):
-            raise NotImplementedError(f"unsupported input ref {ref_s!r} on {node.id}")
+            raise NotImplementedError(f"unsupported input ref {ref_s!r} on {where}")
         producer_out = _node_output_base(run_dir, nodes[ref.node_id])
         ptype = consume_type[port]
         if ptype.startswith("collection<"):
@@ -109,13 +130,34 @@ def _build_inputs(
             continue
         rtype = registry.get(ptype)
         if rtype is None:
-            raise KeyError(f"unknown type {ptype!r} for input {port!r} on {node.id}")
+            raise KeyError(f"unknown type {ptype!r} for input {port!r} on {where}")
         if rtype.kind.value == "file":
             src = artifact_path(producer_out, ref.port, rtype)
             specs.append(FileInput(port=port, src=src, rtype=rtype))
         else:  # dir | any
             specs.append(DirAnyInput(port=port, src=producer_out / ref.port))
     return specs
+
+
+def _build_inputs(
+    node: AgentNode,
+    run_dir: Path,
+    agents: dict[str, AgentSpec],
+    registry: ArtifactRegistry,
+    nodes: dict[str, "Node"],
+) -> list[InputSpec]:
+    """Resolve a plain/map node's non-mapped inputs (``node.inputs``).
+
+    The mapped port (for a map node) is bound per-element by the map loop, not here.
+    """
+    return resolve_data_inputs(
+        agents[node.agent],
+        node.inputs,
+        run_dir=run_dir,
+        registry=registry,
+        nodes=nodes,
+        where=node.id,
+    )
 
 
 # --- plan building ----------------------------------------------------------
@@ -306,21 +348,20 @@ async def run_pipeline(
     deps = node_dependencies(pipeline)
 
     # Reject unsupported node kinds up front so scheduling never starts a run it
-    # cannot finish cleanly (I10). Supported: plain agent nodes + builtin/scanner.
-    # map fan-out and loop/select meta-nodes are separate items (SPEC §10.3).
+    # cannot finish cleanly (I10). Supported: plain/map agent nodes, builtins,
+    # and loop/select meta-nodes. ``map_over`` (models fan-out) is not yet.
     for nid, node in nodes.items():
-        # plain agent or map node (map: collection fan-out). map_over (models
-        # fan-out) is Phase 1; loop/select are separate items.
         supported_agent = isinstance(node, AgentNode) and node.map_over is None
+        supported_meta = isinstance(node, LoopNode | SelectNode)
         supported_builtin = (
             isinstance(node, BuiltinNode)
             and BUILTINS.get(node.builtin_name) is not None
             and BUILTINS[node.builtin_name].run is not None
         )
-        if not (supported_agent or supported_builtin):
+        if not (supported_agent or supported_meta or supported_builtin):
             raise NotImplementedError(
-                f"node {nid!r}: unsupported node kind in Phase 0 "
-                "(SPEC §10.3: map/loop/select not yet)"
+                f"node {nid!r}: unsupported node kind "
+                "(map_over models fan-out is Phase 1)"
             )
     semaphores: dict[str, asyncio.Semaphore] = {}
 
@@ -506,10 +547,36 @@ async def run_pipeline(
         set_node(node.id, NodeStatus.done)
         return NodeStatus.done
 
+    def _resolve_inputs(
+        agent: AgentSpec, inputs: dict[str, str], where: str
+    ) -> list[InputSpec]:
+        return resolve_data_inputs(
+            agent, inputs, run_dir=run_dir, registry=registry, nodes=nodes, where=where
+        )
+
+    meta_ctx = MetaContext(
+        run_dir=run_dir,
+        agents=agents,
+        registry=registry,
+        runtime=runtime,
+        ledger=ledger,
+        nodes=nodes,
+        clock=clock,
+        sleeper=sleeper,
+        emit_event=emit_event,
+        set_node=set_node,
+        semaphore_for=semaphore_for,
+        resolve_inputs=_resolve_inputs,
+    )
+
     async def run_node(node_id: str) -> NodeStatus:
         node = nodes[node_id]
         if isinstance(node, BuiltinNode):
             return await run_builtin(node)
+        if isinstance(node, LoopNode):
+            return await run_loop(node, meta_ctx)
+        if isinstance(node, SelectNode):
+            return await run_select(node, meta_ctx)
         assert isinstance(node, AgentNode)  # guaranteed by the up-front check
         if node.map is not None:
             return await run_map_node(node)

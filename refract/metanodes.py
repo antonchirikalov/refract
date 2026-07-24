@@ -1,5 +1,515 @@
-"""Loop and select meta-node semantics (SPEC §10.3).
+"""Loop and select meta-node execution (SPEC §10.3, Phase 1).
 
-Built on the single step lifecycle in steps.py. Loop round number is derived
-from the ledger, never stored. (Phase 1 — SPEC §17.)
+Both reuse the single step lifecycle in :mod:`refract.steps` — they only add the
+control flow around it. The loop round number is DERIVED from the ledger (never
+stored); output assembly under ``steps/<id>/_out/`` is idempotent so resume
+re-assembles cleanly, exactly like map.
+
+The scheduler owns provider semaphores, the ledger and event emission; it hands
+them here in a :class:`MetaContext` so this module never imports the scheduler
+(which imports it).
 """
+
+from __future__ import annotations
+
+import asyncio
+import json
+import shutil
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from refract.artifacts import artifact_filename, artifact_path, link_or_copy
+from refract.graph import BodyRef, DataRef, parse_ref
+from refract.models.agent import AgentSpec, Port
+from refract.models.ledger import NodeStatus, StepOutcome, StepState, StepStatus
+from refract.models.pipeline import AgentNode, LoopNode, Node, SelectNode
+from refract.models.types import CollectionManifest, CollectionStatus
+from refract.prompt import RevisionContext
+from refract.registry import ArtifactRegistry, model_slug, parse_type_ref
+from refract.runtime.base import AgentRuntime
+from refract.state import Ledger
+from refract.steps import (
+    AgentStepPlan,
+    AuxFileInput,
+    CollectionInput,
+    DirAnyInput,
+    FileInput,
+    InputSpec,
+    execute_agent_step,
+)
+
+_VERDICT_TYPE = "verdict@v1"
+_SELECTION_TYPE = "selection@v1"
+
+
+@dataclass
+class MetaContext:
+    """Execution handles the scheduler lends to loop/select (SPEC §10.5)."""
+
+    run_dir: Path
+    agents: dict[str, AgentSpec]
+    registry: ArtifactRegistry
+    runtime: AgentRuntime
+    ledger: Ledger
+    nodes: dict[str, Node]
+    clock: Callable[[], str]
+    sleeper: Callable[[float], Awaitable[None]]
+    emit_event: Callable[[dict[str, object]], None]
+    set_node: Callable[..., None]
+    semaphore_for: Callable[[str], asyncio.Semaphore]
+    resolve_inputs: Callable[[AgentSpec, dict[str, str], str], list[InputSpec]]
+
+    def agent_dir(self, ref: str) -> Path:
+        return self.run_dir / "snapshot" / "agents" / ref
+
+    def output_base(self, node_id: str) -> Path:
+        """Directory holding a producer node's port outputs (mirror of scheduler)."""
+        node = self.nodes[node_id]
+        if isinstance(node, LoopNode | SelectNode):
+            return self.run_dir / "steps" / node_id / "_out"
+        if isinstance(node, AgentNode) and node.map is not None:
+            return self.run_dir / "steps" / node_id / "_out"
+        return self.run_dir / "steps" / node_id / "main" / "output"
+
+
+def _primary(agent: AgentSpec) -> Port:
+    non_optional = [p for p in agent.produces if not p.optional]
+    if len(non_optional) != 1:
+        raise ValueError(f"agent {agent.name!r} has no single primary output")
+    return non_optional[0]
+
+
+def _warn(ctx: MetaContext, node_id: str, message: str) -> None:
+    ctx.emit_event(
+        {
+            "type": "log",
+            "payload": {"level": "warning", "node_id": node_id, "message": message},
+        }
+    )
+
+
+def _fail(ctx: MetaContext, node_id: str, error: str) -> NodeStatus:
+    ctx.set_node(node_id, NodeStatus.failed, error=error)
+    return NodeStatus.failed
+
+
+async def _run_step(ctx: MetaContext, plan: AgentStepPlan) -> StepState:
+    """Run one sub-step, reusing an already-``done`` ledger step on resume (§10.5)."""
+    existing = ctx.ledger.get_step(plan.step_id)
+    if existing is not None and existing.status is StepStatus.done:
+        return existing
+    async with ctx.semaphore_for(plan.model):
+        return await execute_agent_step(
+            plan,
+            ctx.runtime,
+            ctx.ledger,
+            on_event=ctx.emit_event,
+            clock=ctx.clock,
+            sleeper=ctx.sleeper,
+        )
+
+
+def _port_input(
+    ctx: MetaContext, agent: AgentSpec, port: str, src_port: str, src_out: Path
+) -> InputSpec:
+    """One InputSpec for ``port`` sourced from ``src_out/<src_port>`` (§10.1/§10.4)."""
+    ptype = {p.port: p.type for p in agent.consumes}[port]
+    if ptype.startswith("collection<"):
+        return CollectionInput(port=port, src=src_out / src_port)
+    rtype = ctx.registry.get(ptype)
+    if rtype is None:
+        raise KeyError(f"unknown type {ptype!r} for port {port!r}")
+    if rtype.kind.value == "file":
+        return FileInput(
+            port=port, src=artifact_path(src_out, src_port, rtype), rtype=rtype
+        )
+    return DirAnyInput(port=port, src=src_out / src_port)
+
+
+# --- loop (SPEC §10.3) ------------------------------------------------------
+
+
+async def run_loop(node: LoopNode, ctx: MetaContext) -> NodeStatus:
+    """Run ``body:r1 → critic:r1 → [body:r2 …]`` until approved or max_rounds."""
+    body_agent = ctx.agents[node.body.agent]
+    critic_agent = ctx.agents[node.critic.agent]
+    body_model = node.body.model or node.params.model
+    critic_model = node.critic.model or node.params.model
+    assert body_model is not None and critic_model is not None
+    body_primary = _primary(body_agent)
+
+    ctx.set_node(node.id, NodeStatus.running)
+
+    approved_round: int | None = None
+    last_round = 0
+    for r in range(1, node.params.max_rounds + 1):
+        last_round = r
+        inputs = list(
+            ctx.resolve_inputs(body_agent, node.body.inputs, f"{node.id}.body")
+        )
+        revision: RevisionContext | None = None
+        if r >= 2:
+            aux, revision = _revision(ctx, node, body_agent, body_primary, r)
+            inputs += aux
+        body = await _run_step(
+            ctx,
+            _plan(
+                ctx,
+                step_id=f"{node.id}.body:r{r}",
+                node=node,
+                workdir=ctx.run_dir / "steps" / node.id / f"body_r{r}",
+                agent=body_agent,
+                agent_ref=node.body.agent,
+                model=body_model,
+                inputs=inputs,
+                block=node.body.params,
+                revision=revision,
+            ),
+        )
+        if body.outcome is not StepOutcome.ok:
+            return _fail(ctx, node.id, f"loop body r{r}: {_outcome(body)}")
+
+        body_out = ctx.run_dir / "steps" / node.id / f"body_r{r}" / "output"
+        critic = await _run_step(
+            ctx,
+            _plan(
+                ctx,
+                step_id=f"{node.id}.critic:r{r}",
+                node=node,
+                workdir=ctx.run_dir / "steps" / node.id / f"critic_r{r}",
+                agent=critic_agent,
+                agent_ref=node.critic.agent,
+                model=critic_model,
+                inputs=_critic_inputs(ctx, node, critic_agent, body_agent, body_out),
+                block=node.critic.params,
+                revision=None,
+            ),
+        )
+        if critic.outcome is not StepOutcome.ok:
+            return _fail(ctx, node.id, f"loop critic r{r}: {_outcome(critic)}")
+
+        if _read_verdict(ctx, node, critic_agent, r) == "approved":
+            approved_round = r
+            break
+
+    if approved_round is not None:
+        chosen = approved_round
+    elif node.params.on_max_rounds == "fail":
+        return _fail(
+            ctx, node.id, f"loop: {node.params.max_rounds} rounds without approval"
+        )
+    else:  # pass: take the last round's draft, warn (SPEC §10.3)
+        chosen = last_round
+        _warn(ctx, node.id, f"max_rounds ({node.params.max_rounds}) reached; passing")
+
+    _assemble_loop_output(ctx, node, body_agent, chosen)
+    ctx.set_node(node.id, NodeStatus.done)
+    return NodeStatus.done
+
+
+def _outcome(step: StepState) -> str:
+    return step.outcome.value if step.outcome is not None else "no outcome"
+
+
+def _plan(
+    ctx: MetaContext,
+    *,
+    step_id: str,
+    node: LoopNode,
+    workdir: Path,
+    agent: AgentSpec,
+    agent_ref: str,
+    model: str,
+    inputs: list[InputSpec],
+    block: object,
+    revision: RevisionContext | None,
+) -> AgentStepPlan:
+    def pick(field: str, fallback: int) -> int:
+        val = getattr(block, field, None) if block is not None else None
+        if val is not None:
+            return int(val)
+        loop_val = getattr(node.params, field, None)
+        return int(loop_val) if loop_val is not None else fallback
+
+    timeout = pick("timeout_s", 0) or agent.defaults.timeout_s
+    return AgentStepPlan(
+        step_id=step_id,
+        node_id=node.id,
+        workdir=workdir,
+        agent=agent,
+        agent_dir=ctx.agent_dir(agent_ref),
+        model=model,
+        registry=ctx.registry,
+        inputs=inputs,
+        timeout_s=timeout,
+        gate_retries=pick("gate_retries", 2),
+        infra_retries=pick("infra_retries", 2),
+        revision=revision,
+    )
+
+
+def _critic_inputs(
+    ctx: MetaContext,
+    node: LoopNode,
+    critic_agent: AgentSpec,
+    body_agent: AgentSpec,
+    body_out: Path,
+) -> list[InputSpec]:
+    body_primary = _primary(body_agent)
+    data_refs: dict[str, str] = {}
+    specs: list[InputSpec] = []
+    for port, ref_s in node.critic.inputs.items():
+        ref = parse_ref(ref_s)
+        if isinstance(ref, BodyRef):  # @body / @body.<port> → this round's draft
+            src_port = ref.port or body_primary.port
+            specs.append(_port_input(ctx, critic_agent, port, src_port, body_out))
+        else:
+            data_refs[port] = ref_s
+    specs += ctx.resolve_inputs(critic_agent, data_refs, f"{node.id}.critic")
+    return specs
+
+
+def _revision(
+    ctx: MetaContext,
+    node: LoopNode,
+    body_agent: AgentSpec,
+    body_primary: Port,
+    r: int,
+) -> tuple[list[InputSpec], RevisionContext]:
+    """Materialize ``_previous`` + ``_verdict`` for body round r≥2 (SPEC §10.3/§11)."""
+    prev_rtype = ctx.registry.get(body_primary.type)
+    assert prev_rtype is not None
+    prev_name = artifact_filename(body_primary.port, prev_rtype)
+    prev_src = artifact_path(
+        ctx.run_dir / "steps" / node.id / f"body_r{r - 1}" / "output",
+        body_primary.port,
+        prev_rtype,
+    )
+
+    critic_agent = ctx.agents[node.critic.agent]
+    vrtype = ctx.registry.get(_VERDICT_TYPE)
+    assert vrtype is not None
+    verdict_src = artifact_path(
+        ctx.run_dir / "steps" / node.id / f"critic_r{r - 1}" / "output",
+        _primary(critic_agent).port,
+        vrtype,
+    )
+
+    hint_file = ctx.agent_dir(node.body.agent) / "revision_hint.md"
+    hint = hint_file.read_text("utf-8") if hint_file.exists() else None
+
+    aux: list[InputSpec] = [
+        AuxFileInput(rel_path=f"_previous/{prev_name}", src=prev_src),
+        AuxFileInput(rel_path="_verdict/verdict.json", src=verdict_src),
+    ]
+    revision = RevisionContext(
+        previous_path=f"input/_previous/{prev_name}",
+        verdict_json=verdict_src.read_text("utf-8"),
+        hint=hint,
+    )
+    return aux, revision
+
+
+def _read_verdict(
+    ctx: MetaContext, node: LoopNode, critic_agent: AgentSpec, r: int
+) -> str:
+    """Read the round's verdict from the critic's typed artifact (I4)."""
+    vrtype = ctx.registry.get(_VERDICT_TYPE)
+    assert vrtype is not None
+    path = artifact_path(
+        ctx.run_dir / "steps" / node.id / f"critic_r{r}" / "output",
+        _primary(critic_agent).port,
+        vrtype,
+    )
+    return str(json.loads(path.read_text("utf-8")).get("verdict"))
+
+
+def _assemble_loop_output(
+    ctx: MetaContext, node: LoopNode, body_agent: AgentSpec, chosen: int
+) -> None:
+    """Assemble ``steps/<id>/_out/<outName>.<ext>`` from the chosen body round (§10.3)."""
+    out_dir = ctx.run_dir / "steps" / node.id / "_out"
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    body_out = ctx.run_dir / "steps" / node.id / f"body_r{chosen}" / "output"
+    body_primary = _primary(body_agent)
+    produce_type = {p.port: p.type for p in body_agent.produces}
+    for out_name, ref_s in node.outputs.items():
+        ref = parse_ref(ref_s)
+        src_port = (
+            ref.port if isinstance(ref, BodyRef) and ref.port else body_primary.port
+        )
+        rtype = ctx.registry.get(produce_type.get(src_port, body_primary.type))
+        if rtype is not None and rtype.kind.value == "file":
+            link_or_copy(
+                artifact_path(body_out, src_port, rtype),
+                out_dir / artifact_filename(out_name, rtype),
+            )
+        else:  # dir | any
+            dst = out_dir / out_name
+            dst.mkdir(parents=True, exist_ok=True)
+            src_dir = body_out / src_port
+            if src_dir.is_dir():
+                for child in sorted(src_dir.iterdir()):
+                    link_or_copy(child, dst / child.name)
+
+
+# --- select (SPEC §10.3) ----------------------------------------------------
+
+
+async def run_select(node: SelectNode, ctx: MetaContext) -> NodeStatus:
+    """Pick one winner from the candidate collection (selector skipped at n=1)."""
+    selector_agent = ctx.agents[node.selector.agent]
+    model = node.selector.model or node.params.model
+    assert model is not None
+    ctx.set_node(node.id, NodeStatus.running)
+
+    cand_ref = parse_ref(node.candidates)
+    assert isinstance(cand_ref, DataRef)
+    cand_dir = ctx.output_base(cand_ref.node_id) / cand_ref.port
+    manifest = CollectionManifest.model_validate(
+        json.loads((cand_dir / "_collection.json").read_text("utf-8"))
+    )
+    ok_slugs = [i.slug for i in manifest.items if i.status is CollectionStatus.ok]
+    if not ok_slugs:
+        return _fail(ctx, node.id, "no ok candidates")
+
+    if len(ok_slugs) == 1:  # sole candidate: no selector step (SPEC §10.3)
+        winner: str | None = ok_slugs[0]
+    else:
+        coll_ports = [
+            p for p in selector_agent.consumes if p.type.startswith("collection<")
+        ]
+        sp = node.selector.params
+        step = await _run_step(
+            ctx,
+            AgentStepPlan(
+                step_id=f"{node.id}.selector",
+                node_id=node.id,
+                workdir=ctx.run_dir / "steps" / node.id / "selector",
+                agent=selector_agent,
+                agent_dir=ctx.agent_dir(node.selector.agent),
+                model=model,
+                registry=ctx.registry,
+                inputs=[CollectionInput(port=coll_ports[0].port, src=cand_dir)],
+                timeout_s=(
+                    (sp.timeout_s if sp else None)
+                    or node.params.timeout_s
+                    or selector_agent.defaults.timeout_s
+                ),
+                gate_retries=node.params.gate_retries,
+                infra_retries=node.params.infra_retries,
+                extra_gate=_winner_gate(ctx, selector_agent, ok_slugs),
+            ),
+        )
+        winner = (
+            _read_winner(ctx, node, selector_agent)
+            if step.outcome is StepOutcome.ok
+            else None
+        )
+        if winner not in ok_slugs:
+            if node.params.fallback == "fail":
+                return _fail(ctx, node.id, "selector produced no valid winner")
+            winner = ok_slugs[0]  # fallback: first ok by items order (SPEC §10.3)
+            _warn(ctx, node.id, f"selector fallback to first ok candidate {winner!r}")
+
+    assert winner is not None
+    _assemble_select_output(ctx, node, cand_dir, winner)
+    ctx.ledger.set_node_selection(
+        node.id, winner=winner, winner_model=_winner_model(ctx, cand_ref, winner)
+    )
+    ctx.set_node(node.id, NodeStatus.done)
+    return NodeStatus.done
+
+
+def _winner_gate(
+    ctx: MetaContext, selector_agent: AgentSpec, ok_slugs: list[str]
+) -> Callable[[Path], list[str]]:
+    """Extra gate: ``selection.winner`` must be one of the ok slugs (SPEC §10.3)."""
+    primary = _primary(selector_agent)
+    srtype = ctx.registry.get(_SELECTION_TYPE)
+
+    def check(output_dir: Path) -> list[str]:
+        if srtype is None:
+            return []
+        path = artifact_path(output_dir, primary.port, srtype)
+        try:
+            winner = json.loads(path.read_text("utf-8")).get("winner")
+        except (OSError, json.JSONDecodeError):
+            return ["selection: unreadable winner"]
+        if winner not in ok_slugs:
+            return [f"selection.winner {winner!r} not in ok candidates {ok_slugs}"]
+        return []
+
+    return check
+
+
+def _read_winner(
+    ctx: MetaContext, node: SelectNode, selector_agent: AgentSpec
+) -> str | None:
+    srtype = ctx.registry.get(_SELECTION_TYPE)
+    if srtype is None:
+        return None
+    path = artifact_path(
+        ctx.run_dir / "steps" / node.id / "selector" / "output",
+        _primary(selector_agent).port,
+        srtype,
+    )
+    try:
+        return str(json.loads(path.read_text("utf-8")).get("winner"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _winner_model(ctx: MetaContext, cand_ref: DataRef, winner: str) -> str | None:
+    """Map the winning slug back to its model when candidates come from map_over."""
+    map_over = getattr(ctx.nodes.get(cand_ref.node_id), "map_over", None)
+    if map_over is None:
+        return None
+    for m in map_over.models:
+        if model_slug(m) == winner:
+            return str(m)
+    return None
+
+
+def _assemble_select_output(
+    ctx: MetaContext, node: SelectNode, cand_dir: Path, winner: str
+) -> None:
+    """Assemble ``steps/<id>/_out/out.<ext>`` from the winner element (§10.3)."""
+    out_dir = ctx.run_dir / "steps" / node.id / "_out"
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    inner = _select_inner_type(ctx, node)
+    rtype = ctx.registry.get(inner) if inner else None
+    win_dir = cand_dir / winner
+    if rtype is not None and rtype.kind.value == "file":
+        payload = _sole_file(win_dir)
+        if payload is not None:
+            link_or_copy(payload, out_dir / artifact_filename("out", rtype))
+    elif win_dir.is_dir():
+        for child in sorted(win_dir.iterdir()):
+            link_or_copy(child, out_dir / child.name)
+
+
+def _select_inner_type(ctx: MetaContext, node: SelectNode) -> str | None:
+    """Element type X of the candidates ``collection<X>`` (from its manifest)."""
+    ref = parse_ref(node.candidates)
+    if not isinstance(ref, DataRef):
+        return None
+    cand_dir = ctx.output_base(ref.node_id) / ref.port
+    try:
+        t = json.loads((cand_dir / "_collection.json").read_text("utf-8")).get("type")
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(t, str):
+        return None
+    inner, is_coll = parse_type_ref(t)
+    return inner if is_coll else t
+
+
+def _sole_file(d: Path) -> Path | None:
+    files = [p for p in sorted(d.iterdir()) if p.is_file()] if d.is_dir() else []
+    return files[0] if files else None
