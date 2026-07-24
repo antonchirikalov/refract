@@ -18,9 +18,11 @@ Two halves:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
 import socket
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -233,8 +235,8 @@ class OpencodeRuntime:
             "--port",
             str(port),
             cwd=str(spec.workdir),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         self._procs.add(proc)
         base = f"http://127.0.0.1:{port}"
@@ -361,6 +363,23 @@ class OpencodeRuntime:
 
     async def _terminate(self, proc: asyncio.subprocess.Process) -> None:
         if proc.returncode is not None:
+            return
+        if sys.platform == "win32":
+            # ``opencode serve`` spawns a child process tree; ``terminate()`` only
+            # signals the launcher and leaves the server alive. Kill the whole
+            # tree by pid (CLAUDE.md gotcha: processes MUST be killed).
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/F",
+                "/T",
+                "/PID",
+                str(proc.pid),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await killer.wait()
+            with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
             return
         proc.terminate()
         try:
