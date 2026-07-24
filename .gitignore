@@ -21,3 +21,4 @@ docs/
 .pb-cli/
 *.smoke-proj
 .illus-proj
+test-run/

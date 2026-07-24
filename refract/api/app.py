@@ -1,0 +1,508 @@
+"""FastAPI REST/WS API for the refract engine (SPEC §15).
+
+The API is a thin adapter over the existing CLI ``*_impl`` functions — it does
+NOT reimplement the engine. ``run_impl``/``resume_impl`` are synchronous (they
+call ``asyncio.run`` internally), so runs are launched in the background via
+``asyncio.create_task(asyncio.to_thread(...))`` and the API returns the
+engine-generated ``run_id`` immediately (202). ``GET /api/runs/{id}`` reads the
+run's ``state.json`` (I7 — CLI/UI render only ``state.json`` + ``events.jsonl``).
+
+Errors map to HTTP: ``ValidationFailed`` → 422, ``ActiveRunConflict`` → 409,
+``UsageError`` → 400, missing project/run → 404. Provider API-key *values* are
+never echoed (I8); only the env-var name + availability flag are exposed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+from fastapi import (
+    Body,
+    FastAPI,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+from refract.cli import (
+    AppConfig,
+    RuntimeFactory,
+    UsageError,
+    _active_run,
+    _default_runtime_factory,
+    _new_run_id,
+    resolve_project,
+    resume_impl,
+    run_impl,
+)
+from refract.events import EVENTS_FILENAME, utcnow_iso
+from refract.graph import load_agents, load_pipeline
+from refract.models.ledger import RunState
+from refract.registry import ArtifactRegistry
+
+_TERMINAL = {"completed", "failed", "cancelled"}
+
+
+# --- request / response models ----------------------------------------------
+
+
+class CreateProjectRequest(BaseModel):
+    name: str
+
+
+class ValidationError(BaseModel):
+    code: str
+    node_id: str | None = None
+    message: str
+
+
+class ValidateResponse(BaseModel):
+    ok: bool
+    errors: list[ValidationError] = Field(default_factory=list)
+
+
+class StartRunRequest(BaseModel):
+    pipeline: str
+    overrides: dict[str, str] | None = None
+    reuse_from: str | None = None
+    force: list[str] | None = None
+
+
+class StartRunResponse(BaseModel):
+    run_id: str
+
+
+class PipelineText(BaseModel):
+    name: str
+    yaml: str
+
+
+class ProviderInfo(BaseModel):
+    name: str
+    api_key_env: str
+    available: bool
+    max_concurrent: int
+
+
+class FsEntry(BaseModel):
+    name: str
+    is_dir: bool
+
+
+# --- in-memory run registry --------------------------------------------------
+
+
+@dataclass
+class RunRecord:
+    run_dir: Path
+    project_id: str
+    task: asyncio.Task[Any] | None = None
+    status: str = "running"
+    error: str | None = None
+
+
+@dataclass
+class _State:
+    projects_root: Path
+    app_config: AppConfig
+    runtime_factory: RuntimeFactory
+    clock: Callable[[], str]
+    runs: dict[str, RunRecord] = field(default_factory=dict)
+
+
+def create_app(
+    *,
+    projects_root: Path,
+    app_config: AppConfig,
+    runtime_factory: RuntimeFactory | None = None,
+    clock: Callable[[], str] = utcnow_iso,
+) -> FastAPI:
+    """Build the refract REST/WS API app (SPEC §15).
+
+    ``projects_root`` holds one directory per project (each with a
+    ``project.yaml``). ``runtime_factory`` defaults to the real opencode
+    runtime; tests inject a MockRuntime factory.
+    """
+    st = _State(
+        projects_root=Path(projects_root),
+        app_config=app_config,
+        runtime_factory=runtime_factory or _default_runtime_factory,
+        clock=clock,
+    )
+    api = FastAPI(title="refract", version="0.2")
+
+    # --- helpers -------------------------------------------------------------
+
+    def _project_dir(project_id: str) -> Path:
+        pdir = st.projects_root / project_id
+        if not (pdir / "project.yaml").exists():
+            raise HTTPException(status_code=404, detail=f"no project {project_id!r}")
+        return pdir
+
+    def _find_run_dir(run_id: str) -> Path:
+        rec = st.runs.get(run_id)
+        if rec is not None and (rec.run_dir / "state.json").exists():
+            return rec.run_dir
+        # fall back to scanning projects_root/*/runs/{run_id}
+        for pdir in st.projects_root.iterdir():
+            candidate = pdir / "runs" / run_id
+            if (candidate / "state.json").exists():
+                return candidate
+        raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
+
+    def _collect_errors(
+        project_dir: Path, pipeline: str, overrides: dict[str, str]
+    ) -> list[ValidationError]:
+        proj = resolve_project(project_dir, pipeline)
+        registry = ArtifactRegistry.load(st.app_config.library_path)
+        agents, agent_errors = load_agents(st.app_config.library_path)
+        from refract.cli import _build_context
+
+        ctx = _build_context(
+            st.app_config,
+            registry=registry,
+            agents=agents,
+            default_model=proj.config.defaults.model,
+            model_overrides=overrides,
+        )
+        graph = load_pipeline(proj.pipeline_path, ctx)
+        out: list[ValidationError] = []
+        for e in list(agent_errors) + list(graph.errors):
+            if getattr(e.code, "is_warning", False):
+                continue
+            code = getattr(e.code, "value", str(e.code))
+            out.append(
+                ValidationError(
+                    code=code,
+                    node_id=getattr(e, "node_id", None),
+                    message=getattr(e, "message", str(e)),
+                )
+            )
+        return out
+
+    def _artifact_base(run_dir: Path, step_id: str) -> Path:
+        """Resolve a step's output dir (plain/builtin ``main/output`` or ``_out``)."""
+        out = run_dir / "steps" / step_id / "main" / "output"
+        if out.is_dir():
+            return out
+        alt = run_dir / "steps" / step_id / "_out"
+        if alt.is_dir():
+            return alt
+        raise HTTPException(
+            status_code=404, detail=f"no artifacts for step {step_id!r}"
+        )
+
+    # --- projects ------------------------------------------------------------
+
+    @api.get("/api/projects")
+    def list_projects() -> list[str]:
+        if not st.projects_root.is_dir():
+            return []
+        return sorted(
+            p.name for p in st.projects_root.iterdir() if (p / "project.yaml").exists()
+        )
+
+    @api.post("/api/projects", status_code=201)
+    def create_project(req: CreateProjectRequest) -> dict[str, str]:
+        name = req.name.strip()
+        if not name or "/" in name or "\\" in name or ".." in name:
+            raise HTTPException(status_code=400, detail=f"bad project name {name!r}")
+        pdir = st.projects_root / name
+        if pdir.exists():
+            raise HTTPException(status_code=409, detail=f"project {name!r} exists")
+        (pdir / "pipelines").mkdir(parents=True)
+        (pdir / "input").mkdir()
+        (pdir / "project.yaml").write_text(
+            yaml.safe_dump(
+                {"version": "0.1", "name": name, "input": "./input"},
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return {"id": name}
+
+    @api.get("/api/projects/{project_id}/pipelines")
+    def list_pipelines(project_id: str) -> list[str]:
+        pdir = _project_dir(project_id)
+        pipelines_dir = pdir / "pipelines"
+        if not pipelines_dir.is_dir():
+            return []
+        return sorted(p.stem for p in pipelines_dir.glob("*.yaml"))
+
+    @api.get("/api/projects/{project_id}/pipelines/{name}")
+    def get_pipeline(project_id: str, name: str) -> PipelineText:
+        pdir = _project_dir(project_id)
+        path = pdir / "pipelines" / f"{name}.yaml"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=f"no pipeline {name!r}")
+        return PipelineText(name=name, yaml=path.read_text("utf-8"))
+
+    @api.put("/api/projects/{project_id}/pipelines/{name}")
+    def put_pipeline(
+        project_id: str, name: str, body: str = Body(..., media_type="text/plain")
+    ) -> dict[str, str]:
+        pdir = _project_dir(project_id)
+        active = _active_run(pdir / "runs")
+        if active is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"project has an active run ({active})",
+            )
+        (pdir / "pipelines").mkdir(exist_ok=True)
+        (pdir / "pipelines" / f"{name}.yaml").write_text(body, encoding="utf-8")
+        return {"name": name}
+
+    @api.post("/api/projects/{project_id}/pipelines/{name}/validate")
+    def validate_pipeline(project_id: str, name: str) -> ValidateResponse:
+        pdir = _project_dir(project_id)
+        try:
+            errors = _collect_errors(pdir, name, {})
+        except UsageError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return ValidateResponse(ok=not errors, errors=errors)
+
+    # --- runs ----------------------------------------------------------------
+
+    @api.post("/api/projects/{project_id}/runs", status_code=202)
+    async def start_run(project_id: str, req: StartRunRequest) -> StartRunResponse:
+        pdir = _project_dir(project_id)
+        overrides = req.overrides or {}
+        # Pre-flight synchronously so we can return proper HTTP codes; run_impl
+        # repeats these checks in the background thread (idempotent).
+        try:
+            errors = _collect_errors(pdir, req.pipeline, overrides)
+        except UsageError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail={"errors": [e.model_dump() for e in errors]},
+            )
+        active = _active_run(pdir / "runs")
+        if active is not None:
+            raise HTTPException(
+                status_code=409, detail=f"run {active} is already active"
+            )
+
+        run_id = _unique_run_id(pdir / "runs", st.runs)
+        run_dir = pdir / "runs" / run_id
+        rec = RunRecord(run_dir=run_dir, project_id=project_id)
+        st.runs[run_id] = rec
+
+        async def _launch() -> None:
+            try:
+                status, _ = await asyncio.to_thread(
+                    run_impl,
+                    pdir,
+                    pipeline=req.pipeline,
+                    app=st.app_config,
+                    model_overrides=overrides,
+                    runtime_factory=st.runtime_factory,
+                    run_id=run_id,
+                    force_nodes=req.force,
+                    reuse_run_id=req.reuse_from,
+                    clock=st.clock,
+                )
+                rec.status = status.value
+            except asyncio.CancelledError:
+                rec.status = "cancelled"
+                raise
+            except Exception as e:  # noqa: BLE001 — surface as run status
+                rec.status = "failed"
+                rec.error = str(e)
+
+        rec.task = asyncio.create_task(_launch())
+        return StartRunResponse(run_id=run_id)
+
+    @api.get("/api/runs/{run_id}")
+    def get_run(run_id: str) -> RunState:
+        run_dir = _find_run_dir(run_id)
+        return RunState.model_validate(
+            json.loads((run_dir / "state.json").read_text("utf-8"))
+        )
+
+    @api.get("/api/runs/{run_id}/steps/{step_id}/artifacts")
+    def list_artifacts(run_id: str, step_id: str) -> list[str]:
+        run_dir = _find_run_dir(run_id)
+        base = _artifact_base(run_dir, step_id)
+        return sorted(
+            p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file()
+        )
+
+    @api.get("/api/runs/{run_id}/steps/{step_id}/artifacts/{path:path}")
+    def get_artifact(run_id: str, step_id: str, path: str) -> FileResponse:
+        run_dir = _find_run_dir(run_id)
+        base = _artifact_base(run_dir, step_id).resolve()
+        target = (base / path).resolve()
+        if base not in target.parents and target != base:
+            raise HTTPException(status_code=400, detail="path traversal rejected")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"no artifact {path!r}")
+        return FileResponse(target)
+
+    @api.post("/api/runs/{run_id}/cancel")
+    def cancel_run(run_id: str) -> dict[str, str]:
+        rec = st.runs.get(run_id)
+        if rec is None:
+            # ensure the run at least exists on disk
+            _find_run_dir(run_id)
+            return {"status": "cancelled"}
+        if rec.task is not None and not rec.task.done():
+            rec.task.cancel()
+        rec.status = "cancelled"
+        return {"status": "cancelled"}
+
+    @api.post("/api/runs/{run_id}/pause")
+    def pause_run(run_id: str) -> None:
+        raise HTTPException(status_code=501, detail="pause not implemented (phase 3)")
+
+    @api.post("/api/runs/{run_id}/resume")
+    async def resume_run(run_id: str) -> dict[str, str]:
+        run_dir = _find_run_dir(run_id)
+        rec = st.runs.get(run_id) or RunRecord(
+            run_dir=run_dir, project_id=run_dir.parent.parent.name
+        )
+        st.runs[run_id] = rec
+
+        async def _launch() -> None:
+            try:
+                status = await asyncio.to_thread(
+                    resume_impl,
+                    run_dir,
+                    app=st.app_config,
+                    runtime_factory=st.runtime_factory,
+                    clock=st.clock,
+                )
+                rec.status = status.value
+            except asyncio.CancelledError:
+                rec.status = "cancelled"
+                raise
+            except Exception as e:  # noqa: BLE001
+                rec.status = "failed"
+                rec.error = str(e)
+
+        rec.status = "running"
+        rec.task = asyncio.create_task(_launch())
+        return {"run_id": run_id}
+
+    @api.post("/api/runs/{run_id}/answers")
+    def answer_run(run_id: str) -> None:
+        raise HTTPException(status_code=501, detail="answers not implemented (phase 3)")
+
+    # --- models + fs ---------------------------------------------------------
+
+    @api.get("/api/models")
+    def list_models() -> list[ProviderInfo]:
+        available = st.app_config.available_providers
+        out: list[ProviderInfo] = []
+        for name, p in sorted(st.app_config.providers.providers.items()):
+            out.append(
+                ProviderInfo(
+                    name=name,
+                    api_key_env=p.api_key_env,
+                    available=name in available,
+                    max_concurrent=p.max_concurrent,
+                )
+            )
+        return out
+
+    @api.get("/api/fs/browse")
+    def browse(path: str = Query("")) -> list[FsEntry]:
+        root = st.projects_root.resolve()
+        target = (root / path).resolve() if path else root
+        if root not in target.parents and target != root:
+            raise HTTPException(status_code=400, detail="outside sandbox")
+        if not target.is_dir():
+            raise HTTPException(status_code=404, detail=f"no directory {path!r}")
+        return [
+            FsEntry(name=child.name, is_dir=child.is_dir())
+            for child in sorted(target.iterdir())
+        ]
+
+    # --- WS events -----------------------------------------------------------
+
+    @api.websocket("/api/runs/{run_id}/events")
+    async def stream_events(
+        ws: WebSocket, run_id: str, from_seq: int = Query(0)
+    ) -> None:
+        await ws.accept()
+        try:
+            run_dir = _resolve_run_dir_ws(st, run_id)
+        except FileNotFoundError:
+            await ws.close(code=4404)
+            return
+        events_path = run_dir / EVENTS_FILENAME
+        state_path = run_dir / "state.json"
+        sent = max(from_seq - 1, 0)  # highest seq already delivered
+        try:
+            while True:
+                sent = await _flush(events_path, sent, ws)
+                if _terminal(state_path):
+                    # final drain to catch any events appended after we checked
+                    await _flush(events_path, sent, ws)
+                    break
+                await asyncio.sleep(0.5)
+            await ws.close()
+        except WebSocketDisconnect:
+            return
+
+    return api
+
+
+# --- module-level WS helpers -------------------------------------------------
+
+
+async def _flush(path: Path, sent: int, ws: WebSocket) -> int:
+    """Send every event record with ``seq > sent``; return the new high-water seq."""
+    if not path.exists():
+        return sent
+    for line in path.read_text("utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        record = json.loads(line)
+        seq = int(record.get("seq", 0))
+        if seq > sent:
+            await ws.send_json(record)
+            sent = seq
+    return sent
+
+
+def _terminal(state_path: Path) -> bool:
+    if not state_path.exists():
+        return False
+    try:
+        status = json.loads(state_path.read_text("utf-8")).get("status")
+    except (OSError, json.JSONDecodeError):
+        return False
+    return status in _TERMINAL
+
+
+def _resolve_run_dir_ws(st: _State, run_id: str) -> Path:
+    rec = st.runs.get(run_id)
+    if rec is not None and rec.run_dir.exists():
+        return rec.run_dir
+    for pdir in st.projects_root.iterdir():
+        candidate = pdir / "runs" / run_id
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(run_id)
+
+
+def _unique_run_id(runs_dir: Path, registry: dict[str, RunRecord]) -> str:
+    base = _new_run_id()
+    run_id = base
+    n = 2
+    while run_id in registry or (runs_dir / run_id).exists():
+        run_id = f"{base}_{n}"
+        n += 1
+    return run_id

@@ -139,7 +139,9 @@ def _describe_collection(
         data = json.loads(manifest.read_text("utf-8"))
         items = data.get("items", [])
         capped = len(items) > _COLLECTION_INLINE_MAX_ITEMS
-        shown = {**data, "items": items[:_COLLECTION_INLINE_MAX_ITEMS]} if capped else data
+        shown = (
+            {**data, "items": items[:_COLLECTION_INLINE_MAX_ITEMS]} if capped else data
+        )
         suffix = (
             f" (first {_COLLECTION_INLINE_MAX_ITEMS} of {len(items)})" if capped else ""
         )
@@ -191,7 +193,9 @@ def _inline_element(slug_dir: Path) -> str | None:
         try:
             chunks.append(f.read_text("utf-8"))
         except (OSError, UnicodeDecodeError):
-            chunks.append(f"[{f.name}: {size} bytes, non-text — read the file directly]")
+            chunks.append(
+                f"[{f.name}: {size} bytes, non-text — read the file directly]"
+            )
     return "\n".join(c for c in chunks if c) or None
 
 
