@@ -321,6 +321,30 @@ class TestGate:
         assert result.ok is True
         assert result.problems == []
 
+    def test_dir_kind_empty_not_ok(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        # SPEC §10.2 (CHANGED): a dir artifact must be non-empty, not just present.
+        rtype = registry.get("bundle@v1")
+        assert rtype is not None
+        output_dir = tmp_path / "output"
+        (output_dir / "bundle").mkdir(parents=True)  # empty port dir
+        result = check_port(output_dir, GatePort(port="bundle", rtype=rtype))
+        assert result.ok is False
+        assert any("empty" in p for p in result.problems)
+
+    def test_dir_kind_non_empty_ok(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        rtype = registry.get("bundle@v1")
+        assert rtype is not None
+        output_dir = tmp_path / "output"
+        (output_dir / "bundle").mkdir(parents=True)
+        (output_dir / "bundle" / "fig-1.png").write_bytes(b"\x89PNG\r\n")
+        result = check_port(output_dir, GatePort(port="bundle", rtype=rtype))
+        assert result.ok is True
+        assert result.problems == []
+
     def test_run_gate_skips_optional_ports(
         self, tmp_path: Path, registry: ArtifactRegistry
     ) -> None:

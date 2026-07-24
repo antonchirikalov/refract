@@ -189,6 +189,14 @@ def check_port(output_dir: Path | str, spec: GatePort) -> PortGateResult:
                 )
             problems.extend(spec.rtype.validate_json(data))
         problems.extend(spec.rtype.check_rules(text))
+    else:
+        # dir/any: existence alone is too weak — an agent that produced nothing
+        # would still pass (SPEC §10.2 > CHANGED). Require real content.
+        if path.is_dir():
+            if not any(path.iterdir()):
+                problems.append("output directory is empty")
+        elif path.stat().st_size == 0:
+            problems.append("output file is empty")
 
     return PortGateResult(port=spec.port, ok=not problems, problems=problems)
 
