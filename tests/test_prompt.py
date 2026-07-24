@@ -196,6 +196,31 @@ class TestCollectionInput:
         assert "item-4" in prompt  # last item present
         assert '"total": 5' in prompt
 
+    def test_small_collection_inlines_element_payloads(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        # SPEC §11: small collections inline each ok item's payload so a
+        # consuming agent needn't read files (robust to weak models).
+        agent = _agent(
+            consumes=[{"port": "extracts", "type": "collection<extract@v1>"}]
+        )
+        workdir = tmp_path / "step"
+        input_dir = workdir / "input" / "extracts"
+        input_dir.mkdir(parents=True)
+        (input_dir / "_collection.json").write_text(
+            json.dumps(_collection_manifest(2)), encoding="utf-8"
+        )
+        for i in range(2):
+            slug = input_dir / f"item-{i}"
+            slug.mkdir()
+            (slug / "extract.json").write_text(
+                json.dumps({"source": f"item-{i}.txt", "marker": f"PAYLOAD-{i}"}),
+                encoding="utf-8",
+            )
+        prompt = build_task_prompt(agent=agent, registry=registry, workdir=workdir)
+        assert "PAYLOAD-0" in prompt  # element payloads inlined, not just the index
+        assert "PAYLOAD-1" in prompt
+
     def test_large_collection_not_fully_inlined(
         self, tmp_path: Path, registry: ArtifactRegistry
     ) -> None:
@@ -210,10 +235,12 @@ class TestCollectionInput:
             json.dumps(manifest), encoding="utf-8"
         )
         prompt = build_task_prompt(agent=agent, registry=registry, workdir=workdir)
-        # 51st item (index 50, 0-based) must not appear; stats/path note must.
+        # 51st item (index 50, 0-based) must not appear; the collection path +
+        # element-reading guidance and the total count must.
         assert "item-50" not in prompt
         assert "item-49" in prompt  # 50th item (index 49) is within first 50
-        assert "input/extracts/_collection.json" in prompt
+        assert "input/extracts" in prompt  # port dir; content lives in <slug>/ under it
+        assert "Index" in prompt  # the manifest index is shown
         assert "60" in prompt  # stats total mentioned
 
 

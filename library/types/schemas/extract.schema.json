@@ -3,7 +3,7 @@
   "title": "extract@v1",
   "description": "Structured extraction from a single source document (SPEC §5). One per source; assembled into collection<extract@v1> by the map node.",
   "type": "object",
-  "additionalProperties": false,
+  "additionalProperties": true,
   "required": ["source", "requirements", "trust_level"],
   "properties": {
     "source": {
@@ -12,14 +12,16 @@
     },
     "requirements": {
       "type": "array",
-      "description": "Discrete requirements found in the source. Empty is valid.",
+      "description": "Discrete requirements found in the source (each an object). Empty is valid.",
       "items": {
         "type": "object",
-        "additionalProperties": false,
+        "additionalProperties": true,
         "required": ["text"],
         "properties": {
-          "id": { "type": "string" },
-          "text": { "type": "string" },
+          "text": {
+            "type": "string",
+            "description": "One clear, self-contained requirement sentence."
+          },
           "category": {
             "type": "string",
             "enum": ["functional", "non_functional", "constraint", "assumption"]

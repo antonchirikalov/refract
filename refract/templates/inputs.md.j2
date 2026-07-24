@@ -4,13 +4,12 @@ All paths below are relative to your working directory.
 {% for i in inputs %}
 ### `{{ i.port }}` ({{ i.type }})
 Path: `{{ i.path }}`
-{%- if i.content is not none %}
-
+{% if i.content is not none %}
 Contents:
 ```
 {{ i.content }}
 ```
-{%- elif i.note %}
+{% elif i.note %}
 {{ i.note }}
-{%- endif %}
+{% endif %}
 {% endfor %}

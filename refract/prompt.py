@@ -24,6 +24,7 @@ from refract.registry import ArtifactRegistry, parse_type_ref
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _COLLECTION_INLINE_MAX_ITEMS = 50  # SPEC §11
+INLINE_ELEMENT_MAX_BYTES = 4096  # per collection element payload (SPEC §5 inline)
 
 _env = Environment(
     loader=FileSystemLoader(str(_TEMPLATE_DIR)),
@@ -127,29 +128,71 @@ def _describe_input(
 def _describe_collection(
     port: Port, port_dir: Path, workdir: Path, manifest: Path
 ) -> dict[str, object]:
-    content: str | None = None
-    note: str | None = f"Collection at `{_rel(port_dir, workdir)}`."
+    rel = _rel(port_dir, workdir)
+    lines = [
+        f"This is a **collection** ({port.type}). Each ok item's payload lives in its "
+        f"own directory `{rel}/<slug>/` (the `source` field is only the original "
+        "document's name, not a path). The index and — for small collections — each "
+        "item's content are inlined below."
+    ]
     if manifest.exists():
         data = json.loads(manifest.read_text("utf-8"))
         items = data.get("items", [])
-        if len(items) <= _COLLECTION_INLINE_MAX_ITEMS:
-            content = json.dumps(data, ensure_ascii=False, indent=2)
-            note = None
+        capped = len(items) > _COLLECTION_INLINE_MAX_ITEMS
+        shown = {**data, "items": items[:_COLLECTION_INLINE_MAX_ITEMS]} if capped else data
+        suffix = (
+            f" (first {_COLLECTION_INLINE_MAX_ITEMS} of {len(items)})" if capped else ""
+        )
+        lines.append(
+            f"\nIndex{suffix}:\n```json\n"
+            f"{json.dumps(shown, ensure_ascii=False, indent=2)}\n```"
+        )
+        if not capped:
+            for item in items:
+                if item.get("status") != "ok":
+                    continue
+                payload = _inline_element(port_dir / str(item.get("slug", "")))
+                if payload:
+                    lines.append(
+                        f"\nItem `{item.get('slug')}` (from {item.get('source')}):"
+                        f"\n```\n{payload}\n```"
+                    )
         else:
-            trimmed = dict(data)
-            trimmed["items"] = items[:_COLLECTION_INLINE_MAX_ITEMS]
-            note = (
-                f"Collection at `{_rel(port_dir, workdir)}` — "
-                f"{data.get('stats')}; first {_COLLECTION_INLINE_MAX_ITEMS} items:\n"
-                f"```\n{json.dumps(trimmed, ensure_ascii=False, indent=2)}\n```"
+            lines.append(
+                f"\nToo many items to inline — read each ok item's file(s) under "
+                f"`{rel}/<slug>/`."
             )
     return {
         "port": port.port,
         "type": port.type,
-        "path": _rel(manifest if manifest.exists() else port_dir, workdir),
-        "content": content,
-        "note": note,
+        "path": rel,
+        "content": None,
+        "note": "\n".join(lines),
     }
+
+
+def _inline_element(slug_dir: Path) -> str | None:
+    """Concatenate a collection element's payload file(s) for inlining (§11).
+
+    Reads the ordinary files directly under the element dir (skips ``_item.json``),
+    each capped so one big element can't blow up the prompt. Binary/oversized →
+    a short marker instead of raw bytes.
+    """
+    if not slug_dir.is_dir():
+        return None
+    chunks: list[str] = []
+    for f in sorted(slug_dir.iterdir()):
+        if not f.is_file() or f.name == "_item.json":
+            continue
+        size = f.stat().st_size
+        if size > INLINE_ELEMENT_MAX_BYTES:
+            chunks.append(f"[{f.name}: {size} bytes — read the file directly]")
+            continue
+        try:
+            chunks.append(f.read_text("utf-8"))
+        except (OSError, UnicodeDecodeError):
+            chunks.append(f"[{f.name}: {size} bytes, non-text — read the file directly]")
+    return "\n".join(c for c in chunks if c) or None
 
 
 # --- outputs (SPEC §11 item 3) ---------------------------------------------
@@ -184,12 +227,14 @@ def _schema_summary(registry: ArtifactRegistry, type_name: str) -> str:
     fmt = rtype.format.value if rtype.format is not None else rtype.kind.value
     lines.append(f"Format: {fmt}.")
     if rtype.schema is not None:
-        required = rtype.schema.get("required")
-        props = rtype.schema.get("properties")
-        if isinstance(required, list) and required:
-            lines.append(f"Required fields: {', '.join(str(r) for r in required)}.")
-        if isinstance(props, dict) and props:
-            lines.append(f"Fields: {', '.join(props.keys())}.")
+        # Show the FULL JSON Schema, not just field names — the agent must emit
+        # exactly this shape (nested item structure included), and the gate
+        # validates against it. Generated from the contract (I5).
+        lines.append(
+            "The JSON MUST validate against this JSON Schema:\n```json\n"
+            + json.dumps(rtype.schema, indent=2, ensure_ascii=False)
+            + "\n```"
+        )
     for rule in rtype.rules:
         if isinstance(rule, RegexRule):
             lines.append(f"Must match regex `{rule.pattern}`.")
