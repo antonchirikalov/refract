@@ -12,3 +12,12 @@ __pycache__/
 # refract run outputs
 runs/
 illustrator-sample/
+
+# local / ops docs (environment-specific setup + smoke notes)
+docs/
+# local test-run scratch
+.smoke-home/
+.illus-smoke/
+.pb-cli/
+*.smoke-proj
+.illus-proj
