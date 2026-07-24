@@ -26,7 +26,7 @@ import yaml
 
 from refract.events import EventWriter, utcnow_iso
 from refract.graph import ValidationContext, load_agents, load_pipeline
-from refract.models.agent import AgentSpec
+from refract.models.agent import AgentSpec, tier_at_least
 from refract.models.config import McpFile, ProjectConfig, ProvidersFile
 from refract.models.ledger import (
     NodeStatus,
@@ -188,6 +188,16 @@ def _load_snapshot(
     )
     agents, _ = load_agents(snap)
     return pipeline, agents
+
+
+def _confirm_caps(config: ProjectConfig, agents: dict[str, AgentSpec]) -> set[str]:
+    """Capabilities requiring human confirmation: explicit ``confirm`` + everything
+    at/above ``confirm_tier`` that some used agent needs (SPEC §17 phase 3)."""
+    caps = set(config.confirm)
+    if config.confirm_tier:
+        for agent in agents.values():
+            caps.update(c for c in agent.needs if tier_at_least(c, config.confirm_tier))
+    return caps
 
 
 def _build_context(
@@ -446,6 +456,7 @@ def run_impl(
                 provider_limits=app.provider_limits,
                 project_input_dir=proj.input_dir,
                 reuse_run_dir=reuse_run_dir,
+                confirm_capabilities=_confirm_caps(proj.config, exec_agents),
                 clock=clock,
             )
         )
@@ -509,7 +520,15 @@ def write_answer(run_dir: Path | str, step_id: str, answer: str) -> None:
     step = ledger_step(run_dir, step_id)
     if step is None or step.status is not StepStatus.waiting_human:
         raise UsageError(f"step {step_id!r} is not waiting for a human answer")
-    hitl = run_dir / "steps" / node_id / (leaf or "main") / "hitl"
+    wd = run_dir / "steps" / node_id / (leaf or "main")
+    pending = wd / "confirm" / "pending"
+    if pending.exists():  # a capability confirmation, not an agent question
+        (wd / "confirm" / "approved.json").write_text(
+            json.dumps({"answer": answer}, ensure_ascii=False), encoding="utf-8"
+        )
+        pending.unlink(missing_ok=True)
+        return
+    hitl = wd / "hitl"
     hitl.mkdir(parents=True, exist_ok=True)
     (hitl / "answer.json").write_text(
         json.dumps({"answer": answer}, ensure_ascii=False), encoding="utf-8"
@@ -579,6 +598,7 @@ def resume_impl(
                 events=events,
                 provider_limits=app.provider_limits,
                 project_input_dir=_recover_project_input(run_dir),
+                confirm_capabilities=_recover_confirm_caps(run_dir, agents),
                 clock=clock,
             )
         )
@@ -604,6 +624,21 @@ def _recover_project_input(run_dir: Path) -> Path | None:
         yaml.safe_load(project_file.read_text("utf-8")) or {}
     )
     return (project_dir / config.input).resolve()
+
+
+def _recover_confirm_caps(run_dir: Path, agents: dict[str, AgentSpec]) -> set[str]:
+    """Recover the project's confirm policy for a resume (§17 phase 3).
+
+    The policy lives in project.yaml (not the snapshot); the run-dir layout reveals
+    the project root. Empty set if the layout doesn't match.
+    """
+    project_file = run_dir.parent.parent / "project.yaml"
+    if run_dir.parent.name != "runs" or not project_file.exists():
+        return set()
+    config = ProjectConfig.model_validate(
+        yaml.safe_load(project_file.read_text("utf-8")) or {}
+    )
+    return _confirm_caps(config, agents)
 
 
 def _retry_failed(ledger: Ledger) -> None:

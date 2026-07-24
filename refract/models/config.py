@@ -25,6 +25,12 @@ class ProjectConfig(BaseModel):
     name: str
     input: str = "./input"
     defaults: ProjectDefaults = Field(default_factory=ProjectDefaults)
+    # Capability confirmation policy (SPEC §17 phase 3): a run pauses for a human
+    # to approve any listed capability — explicit names in ``confirm`` and/or every
+    # capability at/above ``confirm_tier`` (safe|moderate|dangerous) — that an
+    # agent needs, before that agent's step runs.
+    confirm: list[str] = Field(default_factory=list)
+    confirm_tier: str | None = None
 
 
 class ProviderConfig(BaseModel):

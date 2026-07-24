@@ -448,6 +448,7 @@ async def run_pipeline(
     provider_limits: dict[str, int] | None = None,
     project_input_dir: Path | str | None = None,
     reuse_run_dir: Path | str | None = None,
+    confirm_capabilities: set[str] | None = None,
     clock: Callable[[], str] = utcnow_iso,
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> RunStatus:
@@ -460,6 +461,7 @@ async def run_pipeline(
     """
     run_dir = Path(run_dir)
     limits = provider_limits or {}
+    confirm_caps = confirm_capabilities or set()
     nodes = {n.id: n for n in pipeline.nodes}
     deps = node_dependencies(pipeline)
 
@@ -893,6 +895,35 @@ async def run_pipeline(
         return status
 
     async def _run_plain_agent(node: AgentNode) -> NodeStatus:
+        # Capability confirmation (SPEC §17 phase 3): pause for a human to approve
+        # sensitive capabilities before the agent runs. Reuses the HITL pause —
+        # `refract answer <run> <node> <text>` writes the approval and resume proceeds.
+        need_confirm = sorted(c for c in agents[node.agent].needs if c in confirm_caps)
+        if need_confirm:
+            wd = run_dir / "steps" / node.id / "main"
+            approved = wd / "confirm" / "approved.json"
+            if not approved.exists():
+                (wd / "confirm").mkdir(parents=True, exist_ok=True)
+                (wd / "confirm" / "pending").write_text("1", encoding="utf-8")
+                q = (
+                    f"Approve capabilities {need_confirm} for agent "
+                    f"{node.agent} at node {node.id}?"
+                )
+                ledger.set_step(
+                    node.id, node=node.id, status=StepStatus.waiting_human, tries=0
+                )
+                emit_event(
+                    {
+                        "type": "step_state_changed",
+                        "step_id": node.id,
+                        "payload": {"from": "pending", "to": "waiting_human"},
+                    }
+                )
+                emit_event(
+                    {"type": "question", "step_id": node.id, "payload": {"question": q}}
+                )
+                set_node(node.id, NodeStatus.waiting_human)
+                return NodeStatus.waiting_human
         plan = _agent_plan(
             node,
             run_dir=run_dir,

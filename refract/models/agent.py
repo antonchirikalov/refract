@@ -15,6 +15,29 @@ _NAME_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 _PORT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 _BASE_CAPABILITIES = frozenset({"read", "edit", "vision", "bash", "webfetch"})
 
+# Capability risk tiers (SPEC §17 phase 3). Ordered safe < moderate < dangerous;
+# a project's confirm policy can require human confirmation at/above a tier.
+_TIER_ORDER = ("safe", "moderate", "dangerous")
+_CAPABILITY_TIER = {
+    "read": "safe",
+    "vision": "safe",
+    "webfetch": "moderate",
+    "edit": "moderate",
+    "bash": "dangerous",
+}
+
+
+def capability_tier(cap: str) -> str:
+    """Risk tier of a capability; ``mcp:<server>`` is moderate, unknown → moderate."""
+    if cap.startswith("mcp:"):
+        return "moderate"
+    return _CAPABILITY_TIER.get(cap, "moderate")
+
+
+def tier_at_least(cap: str, threshold: str) -> bool:
+    """True if ``cap``'s tier is >= ``threshold`` in the safe<moderate<dangerous order."""
+    return _TIER_ORDER.index(capability_tier(cap)) >= _TIER_ORDER.index(threshold)
+
 
 class Port(BaseModel):
     """A consumes/produces port (SPEC §6)."""
