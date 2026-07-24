@@ -1,0 +1,23 @@
+version: "0.1"
+name: discovery
+
+nodes:
+  - id: scan
+    type: builtin/scanner
+
+  - id: extract
+    type: agent
+    agent: source_processor@1
+    map: scan.sources
+    params: { workers: 3, min_ok: 1 }
+
+  - id: refine
+    type: loop
+    params: { max_rounds: 3, model: "kimi/kimi-k3" }
+    body:
+      agent: discovery_writer@1
+      inputs: { extracts: extract.extract }
+    critic:
+      agent: discovery_critic@1
+      inputs: { draft: "@body" }
+    outputs: { report: "@body" }

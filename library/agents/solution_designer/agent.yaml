@@ -1,0 +1,15 @@
+name: solution_designer
+version: 1
+description: >
+  Produces a solution design from a requirements document. Serves two roles in the
+  Solution Design pipeline: a map_over candidate generator (one design per model)
+  and the body of a refine loop (improving the selected design). The optional draft
+  input is the prior design to improve; when absent, it designs from scratch.
+consumes:
+  - { port: requirements, type: requirements@v1 }
+  - { port: draft, type: design_doc@v1, optional: true }
+produces:
+  - { port: design_doc, type: design_doc@v1 }
+needs: [read]
+defaults:
+  timeout_s: 1800

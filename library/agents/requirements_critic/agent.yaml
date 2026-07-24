@@ -1,0 +1,13 @@
+name: requirements_critic
+version: 1
+description: >
+  Reviews a requirements draft and emits a verdict@v1. The critic of the Extract
+  pipeline's refine loop: it judges the draft against the source extracts' intent
+  and returns approved or revise with actionable feedback.
+consumes:
+  - { port: draft, type: requirements@v1 }
+produces:
+  - { port: verdict, type: verdict@v1 }
+needs: [read]
+defaults:
+  timeout_s: 1800

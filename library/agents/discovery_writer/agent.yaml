@@ -1,0 +1,14 @@
+name: discovery_writer
+version: 1
+description: >
+  Synthesizes a discovery report from the collection of per-source extracts,
+  centred on what is still unknown. The body agent of the Discovery pipeline's
+  refine loop: it drafts the report, a critic reviews it, and on 'revise' it
+  drafts again.
+consumes:
+  - { port: extracts, type: collection<extract@v1> }
+produces:
+  - { port: report, type: discovery_report@v1 }
+needs: [read]
+defaults:
+  timeout_s: 1800

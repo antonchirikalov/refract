@@ -1,0 +1,13 @@
+name: solution_design_critic
+version: 1
+description: >
+  Reviews a solution design draft and emits a verdict@v1. The critic of the
+  Solution Design pipeline's refine loop: it judges whether the design satisfies
+  its requirements and is technically sound, and returns approved or revise.
+consumes:
+  - { port: draft, type: design_doc@v1 }
+produces:
+  - { port: verdict, type: verdict@v1 }
+needs: [read]
+defaults:
+  timeout_s: 1800

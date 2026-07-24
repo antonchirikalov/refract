@@ -1,0 +1,13 @@
+name: solution_design_selector
+version: 1
+description: >
+  Chooses the best design from a collection of candidate solution designs and emits
+  a selection@v1. The selector of the Solution Design pipeline's select node: given
+  one design per model, it picks the strongest to carry into the refine loop.
+consumes:
+  - { port: candidates, type: collection<design_doc@v1> }
+produces:
+  - { port: choice, type: selection@v1 }
+needs: [read]
+defaults:
+  timeout_s: 1800
