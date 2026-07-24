@@ -8,6 +8,6 @@ consumes:
   - { port: source, type: source@v1 }
 produces:
   - { port: extract, type: extract@v1 }
-needs: [read, vision]
+needs: [read, edit, vision, "mcp:pdf-reader"]
 defaults:
   timeout_s: 1800

@@ -1,0 +1,33 @@
+# ~/.refract/mcp.yaml  (copy to your $REFRACT_HOME, default ~/.refract)
+#
+# Every MCP server an agent references via `needs: mcp:<name>` must be declared
+# here — refract compiles the matching servers into each step's opencode.json.
+# Secrets go through {env:VAR} placeholders (resolved by opencode from the run
+# env), never as literals (I8). opencode launches each MCP subprocess with ONLY
+# this declared `env`, so pass any key the server needs explicitly.
+#
+# The shipped library needs exactly three servers:
+#   tavily-remote  -> requirements_writer, solution_designer, arch_probe (web research)
+#   pdf-reader     -> source_processor (reading PDF sources)
+#   paperbanana    -> illustrator (image generation)
+
+servers:
+  # Web research (Tavily). Use YOUR launch command — the same one already in your
+  # opencode config. If it's a remote HTTP server use `url:`/`token_env:` instead.
+  tavily-remote:
+    command: ["npx", "-y", "tavily-mcp"]         # <-- replace with your actual command
+    env:
+      TAVILY_API_KEY: "{env:TAVILY_API_KEY}"
+
+  # PDF reading for source_processor. Replace with your pdf-reader MCP launch.
+  pdf-reader:
+    command: ["npx", "-y", "@your-org/pdf-reader-mcp"]   # <-- replace
+    env: {}
+
+  # Image generation for illustrator — verified working end to end.
+  paperbanana:
+    command: ["uvx", "--from", "paperbanana[mcp,openai]", "paperbanana-mcp"]
+    env:
+      OPENAI_API_KEY: "{env:OPENAI_API_KEY}"
+      OPENAI_VLM_MODEL: "gpt-5.2"
+      OPENAI_IMAGE_MODEL: "gpt-image-2"

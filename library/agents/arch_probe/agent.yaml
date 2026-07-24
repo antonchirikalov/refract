@@ -9,6 +9,6 @@ consumes:
   - { port: requirements, type: requirements@v1 }
 produces:
   - { port: arch_report, type: arch_report@v1 }
-needs: [read, "mcp:tavily-remote"]
+needs: [read, edit, "mcp:tavily-remote"]
 defaults:
   timeout_s: 1800

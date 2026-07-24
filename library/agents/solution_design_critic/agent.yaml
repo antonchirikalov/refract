@@ -8,6 +8,6 @@ consumes:
   - { port: draft, type: design_doc@v1 }
 produces:
   - { port: verdict, type: verdict@v1 }
-needs: [read]
+needs: [read, edit]
 defaults:
   timeout_s: 1800

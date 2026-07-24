@@ -9,6 +9,6 @@ consumes:
   - { port: extracts, type: collection<extract@v1> }
 produces:
   - { port: requirements, type: requirements@v1 }
-needs: [read]
+needs: [read, edit, "mcp:tavily-remote"]
 defaults:
   timeout_s: 1800

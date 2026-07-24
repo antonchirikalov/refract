@@ -9,6 +9,6 @@ consumes:
   - { port: design_doc, type: design_doc@v1 }
 produces:
   - { port: publication, type: publication@v1 }
-needs: [read, "mcp:mcp-atlassian"]
+needs: [read, bash]
 defaults:
   timeout_s: 1800

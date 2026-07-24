@@ -1,0 +1,11 @@
+# ~/.refract/providers.yaml  (copy to your $REFRACT_HOME, default ~/.refract)
+#
+# Maps each provider (the prefix of a model string before "/") to the NAME of the
+# env var holding its API key — the key itself never lives in this file (I8).
+# `library_path` points refract at the agent/type library.
+
+providers:
+  openai: { api_key_env: OPENAI_API_KEY, max_concurrent: 4 }
+  # kimi:  { api_key_env: MOONSHOT_API_KEY, max_concurrent: 4 }   # needs baseURL/npm in opencode for a custom provider
+
+library_path: /absolute/path/to/refract/library

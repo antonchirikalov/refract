@@ -10,6 +10,6 @@ consumes:
   - { port: draft, type: design_doc@v1, optional: true }
 produces:
   - { port: design_doc, type: design_doc@v1 }
-needs: [read]
+needs: [read, edit, "mcp:tavily-remote"]
 defaults:
   timeout_s: 1800
