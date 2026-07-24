@@ -135,3 +135,78 @@ def test_question_pauses_then_answer_completes(tmp_path: Path) -> None:
     ) == DOC
     # the answer was consumed and the question attempt archived
     assert not (run_dir / "steps" / "ask" / "main" / "hitl" / "answer.json").exists()
+
+
+def _run_once(run_dir, pl, agents, reg, runtime, ledger):
+    async def go():
+        return await run_pipeline(
+            run_dir,
+            pipeline=pl,
+            agents=agents,
+            registry=reg,
+            runtime=runtime,
+            ledger=ledger,
+            events=EventWriter(run_dir),
+            clock=lambda: "T",
+            sleeper=_no_sleep,
+        )
+
+    return asyncio.run(go())
+
+
+def test_gate_retry_after_answer_does_not_collide(tmp_path: Path) -> None:
+    # Regression: after a HITL answer archives the question turn to attempts/1, a
+    # gate retry must allocate the next free slot (not reuse attempts/1) or the run
+    # crashes. Answer → bad output (fails gate) → retry → good output → completed.
+    agents, reg, pl, run_dir = _setup(tmp_path)
+    ledger = Ledger.create(
+        run_dir, run_id="r", pipeline="hitl", node_ids=["ask"], created_at="T0"
+    )
+    runtime = MockRuntime(
+        {
+            "ask": [
+                ScriptedResponse(files={"q.json": json.dumps({"question": "?"})}),
+                ScriptedResponse(files={"doc.md": "no header, fails the rule"}),
+                ScriptedResponse(files={"doc.md": DOC}),
+            ]
+        }
+    )
+    assert (
+        _run_once(run_dir, pl, agents, reg, runtime, ledger) is RunStatus.waiting_human
+    )
+    write_answer(run_dir, "ask", "answer")
+    status = _run_once(run_dir, pl, agents, reg, runtime, Ledger.load(run_dir))
+    assert status is RunStatus.completed  # no attempts/ collision
+    assert ledger.get_node("ask") is not None
+    base = run_dir / "steps" / "ask" / "main" / "attempts"
+    assert (base / "1").is_dir() and (base / "2").is_dir()  # question + bad turn
+
+
+def test_multi_turn_reask_parks_again(tmp_path: Path) -> None:
+    # A fresh question after an answer re-parks the run (SPEC §16.9 multi-turn).
+    agents, reg, pl, run_dir = _setup(tmp_path)
+    ledger = Ledger.create(
+        run_dir, run_id="r", pipeline="hitl", node_ids=["ask"], created_at="T0"
+    )
+    runtime = MockRuntime(
+        {
+            "ask": [
+                ScriptedResponse(files={"q.json": json.dumps({"question": "q1?"})}),
+                ScriptedResponse(files={"q.json": json.dumps({"question": "q2?"})}),
+                ScriptedResponse(files={"doc.md": DOC}),
+            ]
+        }
+    )
+    assert (
+        _run_once(run_dir, pl, agents, reg, runtime, ledger) is RunStatus.waiting_human
+    )
+    write_answer(run_dir, "ask", "a1")
+    assert (
+        _run_once(run_dir, pl, agents, reg, runtime, Ledger.load(run_dir))
+        is RunStatus.waiting_human
+    )  # re-asked → parked again
+    write_answer(run_dir, "ask", "a2")
+    assert (
+        _run_once(run_dir, pl, agents, reg, runtime, Ledger.load(run_dir))
+        is RunStatus.completed
+    )

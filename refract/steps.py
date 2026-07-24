@@ -353,7 +353,9 @@ async def execute_agent_step(
     gate_feedback: str | None = None
     while True:
         if tries > 0:  # gate retry: archive the prior completed attempt first
-            _archive_attempt(workdir, tries)
+            # allocate the next free slot, not `tries` — a HITL answer-resume may
+            # have already consumed attempts/1 for the parked question turn.
+            _archive_attempt(workdir, _next_attempt(workdir))
             output_dir.mkdir(parents=True, exist_ok=True)
 
         task_prompt = build_task_prompt(
