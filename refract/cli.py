@@ -27,7 +27,7 @@ import yaml
 from refract.events import EventWriter, utcnow_iso
 from refract.graph import ValidationContext, load_agents, load_pipeline
 from refract.models.agent import AgentSpec
-from refract.models.config import ProjectConfig, ProvidersFile
+from refract.models.config import McpFile, ProjectConfig, ProvidersFile
 from refract.models.ledger import NodeStatus, RunState, RunStatus, StepStatus
 from refract.models.pipeline import AgentNode, Pipeline
 from refract.registry import ArtifactRegistry
@@ -55,6 +55,7 @@ class AppConfig:
 
     library_path: Path
     providers: ProvidersFile = field(default_factory=ProvidersFile)
+    mcp: McpFile = field(default_factory=McpFile)
 
     @property
     def known_providers(self) -> set[str]:
@@ -93,13 +94,18 @@ def load_app_config() -> AppConfig:
         raw = yaml.safe_load(providers_file.read_text("utf-8")) or {}
         providers = ProvidersFile.model_validate(raw)
 
+    mcp = McpFile()
+    mcp_file = home / "mcp.yaml"
+    if mcp_file.exists():
+        mcp = McpFile.model_validate(yaml.safe_load(mcp_file.read_text("utf-8")) or {})
+
     lib = os.environ.get("REFRACT_LIBRARY") or providers.library_path
     if not lib:
         raise UsageError(
             "no library_path configured "
             f"(set $REFRACT_LIBRARY or library_path in {providers_file})"
         )
-    return AppConfig(library_path=Path(lib), providers=providers)
+    return AppConfig(library_path=Path(lib), providers=providers, mcp=mcp)
 
 
 class UsageError(Exception):
@@ -277,11 +283,15 @@ def _new_run_id(now: datetime | None = None) -> str:
 
 
 def _default_runtime_factory(app: AppConfig, pipeline: Pipeline) -> AgentRuntime:
-    """Real runs use the opencode runtime — not wired until SPEC §12 lands."""
-    raise UsageError(
-        "the opencode runtime is not implemented yet (SPEC §12); "
-        "runs are exercised via MockRuntime in tests"
-    )
+    """Build the real opencode runtime from app config (SPEC §12).
+
+    Execution is not covered by the automated suite (no real opencode); tests
+    inject a MockRuntime via the ``runtime_factory`` parameter instead. See
+    ``docs/opencode-smoke.md``.
+    """
+    from refract.runtime.opencode import OpencodeRuntime
+
+    return OpencodeRuntime(providers=app.providers, mcp=app.mcp)
 
 
 def _print_errors(errors: Sequence[object]) -> None:

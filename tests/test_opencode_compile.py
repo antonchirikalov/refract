@@ -187,6 +187,21 @@ def test_build_opencode_config_provider_placeholder() -> None:
     assert api_key == "{env:MOONSHOT_API_KEY}"
 
 
+def test_build_opencode_config_auto_approves_permissions() -> None:
+    # SPEC §12 — headless runs auto-approve; every gated permission is "allow".
+    config = build_opencode_config(
+        model="kimi/k2", needs=[], providers=make_providers(), mcp=make_mcp()
+    )
+    perm = config["permission"]
+    assert perm == {
+        "bash": "allow",
+        "edit": "allow",
+        "read": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+    }
+
+
 def test_build_opencode_config_no_provider_entry_when_unknown() -> None:
     # SPEC §12 — provider not present in providers.yaml -> no provider section key.
     config = build_opencode_config(

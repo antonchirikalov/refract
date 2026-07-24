@@ -1,19 +1,26 @@
 """OpencodeRuntime — real opencode adapter (SPEC §12).
 
-Phase 0 implements the *compilation* half: turning a snapshot agent package +
-step spec into the two files opencode reads from a workdir —
-``<workdir>/<AGENTS_SUBDIR>/<name>.md`` (frontmatter ``{model, tools}`` + body =
-system prompt) and ``<workdir>/opencode.json`` (the model's provider + the MCP
-servers named by the agent's ``needs``). This is pure file generation and is the
-only part covered by tests (``test_opencode_compile``); actually spawning
-opencode, confining file access to the workdir (I1), heartbeats and
-auto-approve are the execution half and land in Phase 1 (see the manual smoke
-recipe requirement, SPEC §12/§17).
+Two halves:
+
+* **Compilation** (:func:`compile_step`, covered by ``test_opencode_compile``):
+  turns a snapshot agent package + step spec into the files opencode reads from
+  a workdir — ``<workdir>/<AGENTS_SUBDIR>/<name>.md`` (frontmatter
+  ``{model, tools}`` + body = system prompt) and ``<workdir>/opencode.json``
+  (the model's provider, auto-approve permissions, and the MCP servers named by
+  the agent's ``needs``). Secrets are ``{env:VAR}`` placeholders (I8).
+* **Execution** (:class:`OpencodeRuntime`): one ``opencode serve`` per step with
+  ``cwd`` = the step workdir (I1 confinement), driving the local HTTP API,
+  emitting heartbeats and always killing the process. Not exercised by the
+  automated suite (no real opencode, SPEC §18) — verified via
+  ``docs/opencode-smoke.md``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import shutil
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -92,7 +99,19 @@ def build_opencode_config(
     I8 keeps keys out of project folders/artifacts.
     """
     provider = _provider_of(model)
-    config: dict[str, object] = {"model": model}
+    # Auto-approve every permission opencode gates: the engine confines file
+    # access to the workdir (I1, cwd), so interactive approval is neither
+    # possible nor wanted in a headless run (SPEC §12).
+    config: dict[str, object] = {
+        "model": model,
+        "permission": {
+            "bash": "allow",
+            "edit": "allow",
+            "read": "allow",
+            "webfetch": "allow",
+            "websearch": "allow",
+        },
+    }
     pcfg = providers.providers.get(provider)
     if pcfg is not None:
         config["provider"] = {
@@ -153,20 +172,201 @@ def compile_step(
     return CompiledStep(agent_md=agent_md, opencode_json=opencode_json)
 
 
-class OpencodeRuntime:
-    """Real opencode adapter. Compilation is implemented (Phase 0); executing
-    opencode (I1 confinement, heartbeats, auto-approve) is Phase 1."""
+def _free_port() -> int:
+    """Grab a currently-free localhost TCP port (best effort)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
 
-    def __init__(self, *, providers: ProvidersFile, mcp: McpFile) -> None:
+
+def _model_ref(model: str) -> dict[str, str]:
+    provider, _, model_id = model.partition("/")
+    return {"providerID": provider, "modelID": model_id}
+
+
+class OpencodeRuntime:
+    """Real opencode adapter (SPEC §12).
+
+    One ``opencode serve`` process per step, launched with ``cwd`` = the step
+    workdir so the agent's file access is confined there (I1). The agent package
+    and ``opencode.json`` are compiled into the workdir first (:func:`compile_step`);
+    the task prompt is sent over the local HTTP API selecting the compiled agent.
+    A heartbeat event is emitted every ~10 s. The serve process is always killed
+    (``finally`` + :meth:`close`), even on crash. The engine judges success by the
+    gate over ``output/`` — not by ``StepResult`` (I9): here ``completed=False``
+    means an infra failure (server/transport) worth retrying.
+
+    Not covered by the automated suite (no real opencode; SPEC §18) — see
+    ``docs/opencode-smoke.md`` for the manual smoke recipe.
+    """
+
+    def __init__(
+        self,
+        *,
+        providers: ProvidersFile,
+        mcp: McpFile,
+        exe: str | None = None,
+        health_timeout_s: float = 60.0,
+        heartbeat_s: float = 10.0,
+    ) -> None:
         self._providers = providers
         self._mcp = mcp
+        self._exe = exe or shutil.which("opencode") or "opencode"
+        self._health_timeout_s = health_timeout_s
+        self._heartbeat_s = heartbeat_s
+        self._procs: set[asyncio.subprocess.Process] = set()
+        self._version_checked = False
 
     async def run_step(self, spec: StepSpec, on_event: EventCallback) -> StepResult:
+        import httpx  # local import: keeps httpx off the hot import path
+
+        await self._check_version(on_event)
         compile_step(spec, providers=self._providers, mcp=self._mcp)
-        raise NotImplementedError(
-            "OpencodeRuntime execution is Phase 1 (SPEC §12/§17); "
-            "compilation is available via compile_step()"
+        (spec.workdir / "output").mkdir(parents=True, exist_ok=True)
+
+        port = _free_port()
+        proc = await asyncio.create_subprocess_exec(
+            self._exe,
+            "serve",
+            "--port",
+            str(port),
+            cwd=str(spec.workdir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        self._procs.add(proc)
+        base = f"http://127.0.0.1:{port}"
+        heartbeat: asyncio.Task[None] | None = None
+        agent_events: list[dict[str, object]] = []
+        try:
+            async with httpx.AsyncClient(
+                base_url=base, timeout=spec.timeout_s
+            ) as client:
+                await self._await_health(client)
+                heartbeat = asyncio.create_task(self._heartbeat(spec.step_id, on_event))
+                session = await client.post("/session", json={"title": spec.step_id})
+                session.raise_for_status()
+                session_id = session.json()["id"]
+                name = _agent_name(spec.agent_dir)
+                resp = await client.post(
+                    f"/session/{session_id}/message",
+                    json={
+                        "agent": name,
+                        "model": _model_ref(spec.model),
+                        "parts": [{"type": "text", "text": spec.prompt}],
+                    },
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                text = "".join(
+                    p.get("text", "")
+                    for p in body.get("parts", [])
+                    if p.get("type") == "text"
+                )
+                agent_events = [
+                    {
+                        "type": "log",
+                        "step_id": spec.step_id,
+                        "message": "opencode message complete",
+                    }
+                ]
+                self._write_trace(spec, text, agent_events)
+                error = body.get("error")
+                return StepResult(
+                    completed=True,
+                    agent_error=str(error) if error else None,
+                    usage=body.get("usage"),
+                )
+        except Exception as exc:  # server/transport failure → infra error (retryable)
+            self._write_trace(spec, f"[opencode infra error] {exc}", agent_events)
+            return StepResult(completed=False, agent_error=None)
+        finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+            await self._terminate(proc)
+            self._procs.discard(proc)
+
+    async def _check_version(self, on_event: EventCallback) -> None:
+        if self._version_checked:
+            return
+        self._version_checked = True
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._exe,
+                "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out, _ = await proc.communicate()
+            version = out.decode("utf-8", "replace").strip()
+        except OSError as exc:
+            on_event({"type": "log", "message": f"opencode not runnable: {exc}"})
+            return
+        if OPENCODE_PINNED_VERSION not in version:
+            on_event(
+                {
+                    "type": "log",
+                    "message": (
+                        f"opencode version {version!r} != pinned "
+                        f"{OPENCODE_PINNED_VERSION!r}; proceeding"
+                    ),
+                }
+            )
+
+    async def _await_health(self, client: object) -> None:
+        import httpx
+
+        assert isinstance(client, httpx.AsyncClient)
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + self._health_timeout_s
+        while loop.time() < deadline:
+            try:
+                r = await client.get("/global/health")
+                if r.status_code == 200:
+                    return
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0.25)
+        raise RuntimeError("opencode serve did not become healthy in time")
+
+    async def _heartbeat(self, step_id: str, on_event: EventCallback) -> None:
+        elapsed = 0.0
+        try:
+            while True:
+                await asyncio.sleep(self._heartbeat_s)
+                elapsed += self._heartbeat_s
+                on_event(
+                    {
+                        "type": "heartbeat",
+                        "step_id": step_id,
+                        "payload": {"elapsed_s": int(elapsed)},
+                    }
+                )
+        except asyncio.CancelledError:
+            return
+
+    def _write_trace(
+        self, spec: StepSpec, raw: str, events: list[dict[str, object]]
+    ) -> None:
+        """Persist ``raw.txt`` + ``agent.events.jsonl`` in the workdir (I9)."""
+        (spec.workdir / "raw.txt").write_text(raw, encoding="utf-8")
+        (spec.workdir / "agent.events.jsonl").write_text(
+            "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events),
+            encoding="utf-8",
         )
 
+    async def _terminate(self, proc: asyncio.subprocess.Process) -> None:
+        if proc.returncode is not None:
+            return
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except (TimeoutError, asyncio.TimeoutError):
+            proc.kill()
+            await proc.wait()
+
     async def close(self) -> None:
-        return None
+        """Kill any lingering serve processes (crash-path safety)."""
+        for proc in list(self._procs):
+            await self._terminate(proc)
+        self._procs.clear()
