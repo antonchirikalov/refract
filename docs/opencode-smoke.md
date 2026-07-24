@@ -76,22 +76,30 @@ winner-model-bound loop).
   grep -r "$MOONSHOT_API_KEY" runs/ ; echo "exit=$?"   # expect: no match
   ```
 
-## Assumptions to confirm
+## Interface (verified against opencode 1.18.4, no LLM)
 
-The adapter is written against the interface spectra's spike used; confirm each
-against your installed opencode and adjust `refract/runtime/opencode.py` if needed:
+Confirmed by probing a real `opencode serve` (health, agent discovery, session
+create) — everything except the LLM message send, whose response shape is taken
+from the server's own OpenAPI spec at `GET /doc`:
 
 - `opencode serve --port <p>` starts a localhost HTTP server; `GET /global/health`
-  returns 200 when ready.
-- `POST /session {"title": ...}` returns `{"id": ...}`.
+  returns 200 when ready. ✓ verified
+- `POST /session {"title": ...}` returns `{"id": ...}`. ✓ verified
+- `<workdir>/.opencode/agent/<name>.md` (`AGENTS_SUBDIR`) is discovered — the
+  compiled agent shows up in `GET /agent` alongside global agents. ✓ verified
 - `POST /session/{id}/message {"agent": <name>, "model": {"providerID","modelID"},
   "parts": [{"type":"text","text": <prompt>}]}` runs the turn and returns
-  `{"parts": [...], "error"?, "usage"?}`.
-- Agent markdown lives in `<workdir>/.opencode/agent/<name>.md` (`AGENTS_SUBDIR`);
-  some versions use `.opencode/agents/`.
+  `{"info": {"error"?, "cost", "tokens", ...}, "parts": [{"type":"text","text"}]}`.
+  (from OpenAPI `/doc`; the adapter reads `info.error` / `info.{cost,tokens}` and
+  concatenates the text parts) — **not yet exercised end to end** (needs a key).
+
+Still to confirm on YOUR setup, and adjust `refract/runtime/opencode.py` +
+`OPENCODE_PINNED_VERSION` if they differ:
+
+- The message send actually completes and the agent writes files under
+  `output/` (the whole point — a live LLM run).
 - Custom providers (e.g. `kimi`) may additionally need `baseURL`/`npm` in
   `opencode.json`'s provider block; `providers.yaml` (SPEC §7) currently only
   carries `api_key_env`, so extend both if your provider needs more.
 
-If any of these differ, that is expected drift — fix the adapter, bump
-`OPENCODE_PINNED_VERSION`, and note it here.
+Any drift is expected — fix the adapter, bump `OPENCODE_PINNED_VERSION`, note it here.

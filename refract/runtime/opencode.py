@@ -30,7 +30,9 @@ from refract.models.config import McpFile, McpHttpServer, McpStdioServer, Provid
 from refract.runtime.base import EventCallback, StepResult, StepSpec
 
 # Pinned opencode version; a real run warns on mismatch (`opencode --version`).
-OPENCODE_PINNED_VERSION = "0.4.0"
+# Verified against the 1.18.x headless HTTP API (GET /global/health; POST /session;
+# POST /session/{id}/message -> {info, parts}); see docs/opencode-smoke.md.
+OPENCODE_PINNED_VERSION = "1.18.4"
 # Per-agent markdown dir opencode reads from the workdir. The exact leaf is
 # version-dependent (``.opencode/agent`` vs ``.opencode/agents``); pinned here.
 AGENTS_SUBDIR = ".opencode/agent"
@@ -258,6 +260,8 @@ class OpencodeRuntime:
                 )
                 resp.raise_for_status()
                 body = resp.json()
+                # 1.18.x message response: {info: {error?, cost, tokens, ...}, parts}
+                info = body.get("info", {})
                 text = "".join(
                     p.get("text", "")
                     for p in body.get("parts", [])
@@ -271,11 +275,11 @@ class OpencodeRuntime:
                     }
                 ]
                 self._write_trace(spec, text, agent_events)
-                error = body.get("error")
+                error = info.get("error")
                 return StepResult(
                     completed=True,
-                    agent_error=str(error) if error else None,
-                    usage=body.get("usage"),
+                    agent_error=json.dumps(error) if error else None,
+                    usage={"cost": info.get("cost"), "tokens": info.get("tokens")},
                 )
         except Exception as exc:  # server/transport failure → infra error (retryable)
             self._write_trace(spec, f"[opencode infra error] {exc}", agent_events)
