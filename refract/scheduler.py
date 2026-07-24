@@ -3,11 +3,13 @@
 A node is ready when all nodes sourcing its inputs (including binding deps) are
 done/reused. Ready nodes run concurrently under per-provider semaphores.
 
-Phase 0 scope: plain ``agent`` nodes, ``map`` nodes (collection fan-out: one
-step per ok item, reassembled into an output collection), and ``builtin`` nodes
-(e.g. scanner). A plain agent may consume a whole collection; producing one is
-map's job (I6). ``map_over`` (models fan-out) and meta-nodes (loop/select) are
-separate items and are rejected up front with a clear ``NotImplementedError``.
+Node kinds: plain ``agent`` nodes; ``map`` (collection fan-out, one step per ok
+item) and ``map_over`` (models fan-out, one step per model), both reassembled
+into an output collection; ``builtin`` nodes (e.g. scanner); and ``loop``/
+``select`` meta-nodes (executed in :mod:`refract.metanodes`). A plain agent may
+consume a whole collection; producing one is the engine's job (I6). A
+``model: "@<select>.winner_model"`` binding is resolved from the ledger and adds
+a scheduling dependency on that select node (SPEC §8.1).
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from pathlib import Path
 from refract.artifacts import artifact_path, link_or_copy
 from refract.builtins import BUILTINS
 from refract.events import EventWriter, utcnow_iso
-from refract.graph import DataRef, parse_ref
+from refract.graph import BindingRef, DataRef, parse_ref
 from refract.models.agent import AgentSpec
 from refract.models.ledger import NodeStatus, RunStatus, StepOutcome, StepStatus
 from refract.models.pipeline import (
@@ -40,7 +42,7 @@ from refract.models.types import (
     CollectionStatus,
     ItemInfo,
 )
-from refract.registry import ArtifactRegistry, ResolvedType, make_collection
+from refract.registry import ArtifactRegistry, ResolvedType, make_collection, model_slug
 from refract.runtime.base import AgentRuntime
 from refract.metanodes import MetaContext, run_loop, run_select
 from refract.state import Ledger
@@ -70,18 +72,30 @@ def node_dependencies(pipeline: Pipeline) -> dict[str, set[str]]:
         if isinstance(ref, DataRef) and ref.node_id in ids:
             deps[node_id].add(ref.node_id)
 
+    def add_binding(node_id: str, model: str | None) -> None:
+        # ``model: "@<select>.winner_model"`` waits for that select node (§8.1).
+        if model is None:
+            return
+        ref = parse_ref(model)
+        if isinstance(ref, BindingRef) and ref.node_id in ids:
+            deps[node_id].add(ref.node_id)
+
     for node in pipeline.nodes:
         if isinstance(node, AgentNode):
             for ref_s in node.inputs.values():
                 add(node.id, ref_s)
             if node.map is not None:  # the mapped collection is a dependency too
                 add(node.id, node.map)
+            add_binding(node.id, node.params.model)
         elif isinstance(node, LoopNode):
             # body/critic external inputs (``@body`` refs are loop-internal, skipped)
             for ref_s in (*node.body.inputs.values(), *node.critic.inputs.values()):
                 add(node.id, ref_s)
+            add_binding(node.id, node.body.model)
+            add_binding(node.id, node.critic.model)
         elif isinstance(node, SelectNode):
             add(node.id, node.candidates)
+            add_binding(node.id, node.selector.model)
     return deps
 
 
@@ -96,7 +110,7 @@ def _node_output_base(run_dir: Path, node: Node) -> Path:
     """
     if isinstance(node, LoopNode | SelectNode):
         return run_dir / "steps" / node.id / "_out"
-    if isinstance(node, AgentNode) and node.map is not None:
+    if isinstance(node, AgentNode) and (node.map is not None or node.map_over is not None):
         return run_dir / "steps" / node.id / "_out"
     return run_dir / "steps" / node.id / "main" / "output"
 
@@ -170,11 +184,12 @@ def _agent_plan(
     agents: dict[str, AgentSpec],
     registry: ArtifactRegistry,
     nodes: dict[str, Node],
+    ledger: Ledger,
 ) -> AgentStepPlan:
     agent = agents[node.agent]
-    model = node.params.model
-    if model is None:
+    if node.params.model is None:
         raise ValueError(f"node {node.id!r} has no resolved model")
+    model = resolve_model(node.params.model, ledger)
     timeout = node.params.timeout_s or agent.defaults.timeout_s
     return AgentStepPlan(
         step_id=node.id,
@@ -193,6 +208,25 @@ def _agent_plan(
 
 def _provider_of(model: str) -> str:
     return model.split("/", 1)[0]
+
+
+def resolve_model(model: str, ledger: Ledger) -> str:
+    """Resolve a ``model:`` string, following a ``@<select>.winner_model`` binding.
+
+    The binding reads the select node's exported ``winner_model`` from the ledger
+    (SPEC §8.1); the scheduler guarantees the select node ran first via the
+    binding dependency in :func:`node_dependencies`.
+    """
+    ref = parse_ref(model)
+    if not isinstance(ref, BindingRef):
+        return model
+    node = ledger.get_node(ref.node_id)
+    winner_model = node.winner_model if node is not None else None
+    if winner_model is None:
+        raise ValueError(
+            f"winner_model binding {model!r}: {ref.node_id!r} has no winner_model"
+        )
+    return winner_model
 
 
 # --- map fan-out (SPEC §10.3) -----------------------------------------------
@@ -324,6 +358,78 @@ def _assemble_map_output(
     return ok
 
 
+# --- map_over fan-out over models (SPEC §8.1/§10.3) -------------------------
+
+
+def _map_over_binding(
+    node: AgentNode, agent: AgentSpec, registry: ArtifactRegistry
+) -> tuple[str, ResolvedType, str]:
+    """``(out_port, out_rtype, collection_type)`` for a map_over node's output."""
+    primary = [p for p in agent.produces if not p.optional]
+    if len(primary) != 1:
+        raise ValueError(
+            f"map_over node {node.id!r}: agent has no single primary output"
+        )
+    out_rtype = registry.get(primary[0].type)
+    if out_rtype is None:
+        raise KeyError(f"unknown produce type {primary[0].type!r} on {node.id}")
+    return primary[0].port, out_rtype, make_collection(primary[0].type)
+
+
+def _assemble_map_over_output(
+    node: AgentNode,
+    *,
+    out_port: str,
+    out_rtype: ResolvedType,
+    collection_type: str,
+    models: list[str],
+    results: dict[str, StepOutcome],
+    run_dir: Path,
+) -> int:
+    """Assemble ``steps/<node>/_out/<port>/`` — one element per model (§10.3). Ok count.
+
+    Element slug = model slug; ``source`` = the model string. Idempotent like map.
+    """
+    out_dir = run_dir / "steps" / node.id / "_out" / out_port
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    items: list[CollectionItem] = []
+    ok = 0
+    for model in models:
+        slug = model_slug(model)
+        if results.get(slug) is StepOutcome.ok:
+            step_output = run_dir / "steps" / node.id / slug / "output"
+            _copy_element_payload(step_output, out_dir / slug, out_port, out_rtype)
+            status, error, ok = CollectionStatus.ok, None, ok + 1
+        else:
+            outcome = results.get(slug)
+            status = CollectionStatus.failed
+            error = outcome.value if outcome is not None else "not executed"
+        items.append(
+            CollectionItem(
+                slug=slug,
+                source=model,
+                source_hash=f"model:{model}",
+                status=status,
+                path=f"{slug}/",
+                error=error,
+            )
+        )
+
+    manifest = CollectionManifest(
+        type=collection_type,
+        items=items,
+        stats=CollectionStats(total=len(items), ok=ok, failed=len(items) - ok),
+    )
+    (out_dir / "_collection.json").write_text(
+        json.dumps(manifest.model_dump(mode="json"), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return ok
+
+
 # --- the run loop -----------------------------------------------------------
 
 
@@ -351,7 +457,7 @@ async def run_pipeline(
     # cannot finish cleanly (I10). Supported: plain/map agent nodes, builtins,
     # and loop/select meta-nodes. ``map_over`` (models fan-out) is not yet.
     for nid, node in nodes.items():
-        supported_agent = isinstance(node, AgentNode) and node.map_over is None
+        supported_agent = isinstance(node, AgentNode)
         supported_meta = isinstance(node, LoopNode | SelectNode)
         supported_builtin = (
             isinstance(node, BuiltinNode)
@@ -359,10 +465,7 @@ async def run_pipeline(
             and BUILTINS[node.builtin_name].run is not None
         )
         if not (supported_agent or supported_meta or supported_builtin):
-            raise NotImplementedError(
-                f"node {nid!r}: unsupported node kind "
-                "(map_over models fan-out is Phase 1)"
-            )
+            raise NotImplementedError(f"node {nid!r}: unsupported node kind")
     semaphores: dict[str, asyncio.Semaphore] = {}
 
     def emit_event(event: dict[str, object]) -> None:
@@ -547,6 +650,73 @@ async def run_pipeline(
         set_node(node.id, NodeStatus.done)
         return NodeStatus.done
 
+    async def run_map_over_node(node: AgentNode) -> NodeStatus:
+        """Fan a map_over node out over its models, one step per model (§8.1/§10.3)."""
+        agent = agents[node.agent]
+        assert node.map_over is not None
+        models = list(node.map_over.models)
+        out_port, out_rtype, coll_type = _map_over_binding(node, agent, registry)
+        shared = _build_inputs(node, run_dir, agents, registry, nodes)
+
+        set_node(node.id, NodeStatus.running)
+        workers_sem = asyncio.Semaphore(max(1, node.params.workers))
+        results: dict[str, StepOutcome] = {}
+
+        async def run_one(model: str) -> None:
+            slug = model_slug(model)
+            step_id = f"{node.id}:{slug}"
+            existing = ledger.get_step(step_id)
+            if existing is not None and existing.status is StepStatus.done:
+                results[slug] = existing.outcome or StepOutcome.ok
+                return
+            plan = AgentStepPlan(
+                step_id=step_id,
+                node_id=node.id,
+                workdir=run_dir / "steps" / node.id / slug,
+                agent=agent,
+                agent_dir=run_dir / "snapshot" / "agents" / node.agent,
+                model=model,
+                registry=registry,
+                inputs=list(shared),
+                timeout_s=node.params.timeout_s or agent.defaults.timeout_s,
+                gate_retries=node.params.gate_retries,
+                infra_retries=node.params.infra_retries,
+            )
+            async with workers_sem, semaphore_for(model):
+                step = await execute_agent_step(
+                    plan,
+                    runtime,
+                    ledger,
+                    on_event=emit_event,
+                    clock=clock,
+                    sleeper=sleeper,
+                )
+            results[slug] = step.outcome or StepOutcome.failed_infra
+
+        await asyncio.gather(*(run_one(m) for m in models))
+
+        ok_count = _assemble_map_over_output(
+            node,
+            out_port=out_port,
+            out_rtype=out_rtype,
+            collection_type=coll_type,
+            models=models,
+            results=results,
+            run_dir=run_dir,
+        )
+        failed_count = len(models) - ok_count
+        if ok_count < node.params.min_ok or (
+            node.params.on_item_failure == "fail" and failed_count > 0
+        ):
+            set_node(
+                node.id,
+                NodeStatus.failed,
+                error=f"map_over: ok={ok_count} min_ok={node.params.min_ok} failed={failed_count}",
+            )
+            return NodeStatus.failed
+        set_node(node.id, NodeStatus.done)
+        return NodeStatus.done
+
     def _resolve_inputs(
         agent: AgentSpec, inputs: dict[str, str], where: str
     ) -> list[InputSpec]:
@@ -567,6 +737,7 @@ async def run_pipeline(
         set_node=set_node,
         semaphore_for=semaphore_for,
         resolve_inputs=_resolve_inputs,
+        resolve_model=lambda m: resolve_model(m, ledger),
     )
 
     async def run_node(node_id: str) -> NodeStatus:
@@ -580,8 +751,15 @@ async def run_pipeline(
         assert isinstance(node, AgentNode)  # guaranteed by the up-front check
         if node.map is not None:
             return await run_map_node(node)
+        if node.map_over is not None:
+            return await run_map_over_node(node)
         plan = _agent_plan(
-            node, run_dir=run_dir, agents=agents, registry=registry, nodes=nodes
+            node,
+            run_dir=run_dir,
+            agents=agents,
+            registry=registry,
+            nodes=nodes,
+            ledger=ledger,
         )
         async with semaphore_for(plan.model):
             # flip to running only once actually executing, not while queued

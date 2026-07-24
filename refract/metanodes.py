@@ -59,6 +59,7 @@ class MetaContext:
     set_node: Callable[..., None]
     semaphore_for: Callable[[str], asyncio.Semaphore]
     resolve_inputs: Callable[[AgentSpec, dict[str, str], str], list[InputSpec]]
+    resolve_model: Callable[[str], str]
 
     def agent_dir(self, ref: str) -> Path:
         return self.run_dir / "snapshot" / "agents" / ref
@@ -68,7 +69,9 @@ class MetaContext:
         node = self.nodes[node_id]
         if isinstance(node, LoopNode | SelectNode):
             return self.run_dir / "steps" / node_id / "_out"
-        if isinstance(node, AgentNode) and node.map is not None:
+        if isinstance(node, AgentNode) and (
+            node.map is not None or node.map_over is not None
+        ):
             return self.run_dir / "steps" / node_id / "_out"
         return self.run_dir / "steps" / node_id / "main" / "output"
 
@@ -134,9 +137,11 @@ async def run_loop(node: LoopNode, ctx: MetaContext) -> NodeStatus:
     """Run ``body:r1 → critic:r1 → [body:r2 …]`` until approved or max_rounds."""
     body_agent = ctx.agents[node.body.agent]
     critic_agent = ctx.agents[node.critic.agent]
-    body_model = node.body.model or node.params.model
-    critic_model = node.critic.model or node.params.model
-    assert body_model is not None and critic_model is not None
+    body_model_raw = node.body.model or node.params.model
+    critic_model_raw = node.critic.model or node.params.model
+    assert body_model_raw is not None and critic_model_raw is not None
+    body_model = ctx.resolve_model(body_model_raw)
+    critic_model = ctx.resolve_model(critic_model_raw)
     body_primary = _primary(body_agent)
 
     ctx.set_node(node.id, NodeStatus.running)
@@ -362,8 +367,9 @@ def _assemble_loop_output(
 async def run_select(node: SelectNode, ctx: MetaContext) -> NodeStatus:
     """Pick one winner from the candidate collection (selector skipped at n=1)."""
     selector_agent = ctx.agents[node.selector.agent]
-    model = node.selector.model or node.params.model
-    assert model is not None
+    model_raw = node.selector.model or node.params.model
+    assert model_raw is not None
+    model = ctx.resolve_model(model_raw)
     ctx.set_node(node.id, NodeStatus.running)
 
     cand_ref = parse_ref(node.candidates)
