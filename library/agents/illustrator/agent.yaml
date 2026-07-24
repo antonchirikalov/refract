@@ -1,0 +1,13 @@
+name: illustrator
+version: 1
+description: >
+  Creates publication-ready illustrations for a solution design. Plans the figures a
+  document needs, generates them via an image model, and emits a directory of images
+  plus a manifest recording each figure's caption and regeneration prompt.
+consumes:
+  - { port: design_doc, type: design_doc@v1 }
+produces:
+  - { port: illustration, type: illustration@v1 }
+needs: [read, vision, "mcp:google-imagen"]
+defaults:
+  timeout_s: 1800

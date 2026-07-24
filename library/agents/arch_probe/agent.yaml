@@ -1,0 +1,14 @@
+name: arch_probe
+version: 1
+description: >
+  An enterprise architect that mines a requirements document for architectural
+  gaps, contradictions, and unstated trade-offs, then produces workshop-ready
+  discovery questions grounded in what the material actually says. May run
+  targeted domain research to sharpen the probes.
+consumes:
+  - { port: requirements, type: requirements@v1 }
+produces:
+  - { port: arch_report, type: arch_report@v1 }
+needs: [read, webfetch]
+defaults:
+  timeout_s: 1800

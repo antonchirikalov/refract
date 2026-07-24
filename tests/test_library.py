@@ -9,9 +9,19 @@ from __future__ import annotations
 from pathlib import Path
 
 from refract.graph import ValidationContext, load_agents, load_pipeline
-from refract.registry import ArtifactRegistry
+from refract.registry import ArtifactRegistry, parse_type_ref
 
 LIBRARY = Path(__file__).resolve().parents[1] / "library"
+
+# The 6 spectra agents migrated as refract-native packages (SPEC §6/§17).
+_MIGRATED_AGENTS = {
+    "arch_probe@1",
+    "arch_critic@1",
+    "effort_estimator@1",
+    "illustrator@1",
+    "confluence_publisher@1",
+    "word_form_builder@1",
+}
 
 
 def test_library_agents_load_without_errors() -> None:
@@ -29,6 +39,31 @@ def test_registry_loads_extract_type_and_schema() -> None:
     assert reg.has("extract@v1")
     assert reg.has("requirements@v1")
     assert reg.has("source@v1")
+
+
+def test_migrated_spectra_agents_present_and_self_consistent() -> None:
+    """All 6 migrated agents load cleanly and every port type resolves (§6/§17)."""
+    agents, errors = load_agents(LIBRARY)
+    assert errors == []
+    assert _MIGRATED_AGENTS <= set(agents)
+
+    reg = ArtifactRegistry.load(LIBRARY)
+    for ref in _MIGRATED_AGENTS:
+        spec = agents[ref]
+        ports = list(spec.consumes) + list(spec.produces)
+        for port in ports:
+            inner, _ = parse_type_ref(port.type)
+            assert reg.has(inner) or reg.knows_ref(port.type), (
+                ref,
+                port.port,
+                port.type,
+            )
+        # I6: exactly one non-optional produce port, never a collection produce.
+        non_optional = [p for p in spec.produces if not p.optional]
+        assert len(non_optional) == 1, (ref, [p.port for p in non_optional])
+        for p in spec.produces:
+            _, is_coll = parse_type_ref(p.type)
+            assert not is_coll, (ref, p.port)
 
 
 def test_extract_pipeline_validates(tmp_path: Path) -> None:

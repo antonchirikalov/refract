@@ -1,0 +1,14 @@
+name: arch_critic
+version: 1
+description: >
+  Reviews an architecture-probe report and emits a verdict@v1. The critic of the
+  architecture refine loop: it rejects generic or already-answered questions and
+  approves only a report whose probes demonstrate close reading and would move a
+  real design decision.
+consumes:
+  - { port: draft, type: arch_report@v1 }
+produces:
+  - { port: verdict, type: verdict@v1 }
+needs: [read]
+defaults:
+  timeout_s: 1800

@@ -1,0 +1,14 @@
+name: confluence_publisher
+version: 1
+description: >
+  Publishes a finalized design document to Confluence: converts the markdown to the
+  platform's storage format, creates or updates the page under a parent, uploads any
+  associated attachments, and returns a publish confirmation recording the page URL,
+  id, version, and attachment count.
+consumes:
+  - { port: design_doc, type: design_doc@v1 }
+produces:
+  - { port: publication, type: publication@v1 }
+needs: [read, "mcp:confluence"]
+defaults:
+  timeout_s: 1800
