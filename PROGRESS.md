@@ -15,7 +15,7 @@ clean). Remaining before the phase can be *signed off*: manual smoke on real ope
 | Phase | Scope (SPEC §17) | Status |
 |---|---|---|
 | 0 | pyproject+scaffolding, PROGRESS.md, models, registry (+builtin types), graph+validator (all §8.3 codes), scheduler (no loop/select), map (+aggregation, provider semaphores), scanner, steps (full §10.2), state (nodes+steps, resume, force-step), snapshot, prompt, runtime base+mock+opencode-compile, CLI (validate/run/status/resume), examples/demo-project, migrate source_processor + requirements_writer | **done** (real-opencode manual smoke pending in Phase 1) |
-| 1 | metanodes (loop/select), map_over.models, winner_model binding **done** (test_loop/test_select/test_map_over green); remaining: rerun/reuse + `refract rerun`, remaining spectra agents, 3 library templates, docs/opencode-smoke.md, OpencodeRuntime exec + manual smoke | in progress |
+| 1 | metanodes (loop/select), map_over.models, winner_model binding, rerun/reuse + `refract rerun` **done** (test_loop/test_select/test_map_over/test_reuse green, spec-audited); remaining: remaining spectra agents, 3 library templates, docs/opencode-smoke.md, OpencodeRuntime exec + manual smoke | in progress |
 | 2 | api/ + WS; frontend UI spec separate | remaining |
 | 3 | HITL, capability tiers, confirmations | remaining |
 | 4 | graph patch ops, builder-LLM catalog (out of this spec) | remaining |

@@ -44,6 +44,7 @@ from refract.models.types import (
 )
 from refract.registry import ArtifactRegistry, ResolvedType, make_collection, model_slug
 from refract.runtime.base import AgentRuntime
+from refract import reuse
 from refract.metanodes import MetaContext, run_loop, run_select
 from refract.state import Ledger
 from refract.steps import (
@@ -110,7 +111,9 @@ def _node_output_base(run_dir: Path, node: Node) -> Path:
     """
     if isinstance(node, LoopNode | SelectNode):
         return run_dir / "steps" / node.id / "_out"
-    if isinstance(node, AgentNode) and (node.map is not None or node.map_over is not None):
+    if isinstance(node, AgentNode) and (
+        node.map is not None or node.map_over is not None
+    ):
         return run_dir / "steps" / node.id / "_out"
     return run_dir / "steps" / node.id / "main" / "output"
 
@@ -444,10 +447,17 @@ async def run_pipeline(
     events: EventWriter,
     provider_limits: dict[str, int] | None = None,
     project_input_dir: Path | str | None = None,
+    reuse_run_dir: Path | str | None = None,
     clock: Callable[[], str] = utcnow_iso,
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> RunStatus:
-    """Execute the pipeline to a terminal run status (SPEC §10.5, Phase 0)."""
+    """Execute the pipeline to a terminal run status (SPEC §10.5).
+
+    When ``reuse_run_dir`` is given, this is a rerun: nodes outside the recompute
+    set ``R = force_nodes ∪ descendants`` with unchanged inputs are reused
+    wholesale from that prior run; builtins always execute; map nodes diff their
+    elements by ``(slug, source_hash)`` (SPEC §10.5).
+    """
     run_dir = Path(run_dir)
     limits = provider_limits or {}
     nodes = {n.id: n for n in pipeline.nodes}
@@ -497,6 +507,74 @@ async def run_pipeline(
                 },
             }
         )
+
+    # --- reuse / rerun setup (SPEC §10.5) ---
+    reuse_dir = Path(reuse_run_dir) if reuse_run_dir is not None else None
+    reuse_state = reuse.load_run_state(reuse_dir) if reuse_dir is not None else None
+    recompute: set[str] = (
+        reuse.recompute_set(deps, ledger.state.force_nodes) if reuse_dir else set()
+    )
+    changed_nodes: set[str] = set()  # nodes re-executed with (assumed) different output
+
+    def reuse_node(node: Node) -> NodeStatus:
+        """Copy a node's step outputs from the reuse run; mark steps + node reused."""
+        assert reuse_dir is not None and reuse_state is not None
+        src = reuse_dir / "steps" / node.id
+        reuse.copy_tree_linked(src, run_dir / "steps" / node.id)
+        for step_id, st in reuse_state.steps.items():
+            if st.node != node.id:
+                continue
+            ledger.set_step(
+                step_id,
+                node=node.id,
+                status=StepStatus.reused,
+                outcome=st.outcome,
+                tries=st.tries,
+            )
+            emit_event(
+                {
+                    "type": "step_state_changed",
+                    "step_id": step_id,
+                    "payload": {"from": "pending", "to": "reused"},
+                }
+            )
+        set_node(node.id, NodeStatus.reused)
+        # carry forward node-level exports (select winner/winner_model) so a
+        # downstream ``@<select>.winner_model`` binding still resolves (§8.1).
+        prev = reuse_state.nodes.get(node.id)
+        if prev is not None and (
+            prev.winner is not None or prev.winner_model is not None
+        ):
+            ledger.set_node_selection(
+                node.id, winner=prev.winner, winner_model=prev.winner_model
+            )
+        return NodeStatus.reused
+
+    def reusable(node: Node) -> bool:
+        """A node may be reused only if it succeeded in the reuse run (§10.5)."""
+        if reuse_state is None:
+            return False
+        prev = reuse_state.nodes.get(node.id)
+        return prev is not None and prev.status in (
+            NodeStatus.done,
+            NodeStatus.reused,
+        )
+
+    def builtin_changed(node: BuiltinNode) -> bool:
+        if reuse_dir is None:
+            return True
+        port = BUILTINS[node.builtin_name].produces[0].port
+        old = reuse.builtin_signature(
+            reuse_dir / "steps" / node.id / "main" / "output", port
+        )
+        new = reuse.builtin_signature(
+            run_dir / "steps" / node.id / "main" / "output", port
+        )
+        # an empty signature means the output couldn't be verified (no manifest);
+        # treat that as changed so downstream is never wrongly kept reused (§10.5).
+        if not new:
+            return True
+        return old != new
 
     async def run_builtin(node: BuiltinNode) -> NodeStatus:
         """Execute a builtin node: deterministic, no runner, ledger + outputs only (I9)."""
@@ -593,12 +671,39 @@ async def run_pipeline(
         set_node(node.id, NodeStatus.running)
         workers_sem = asyncio.Semaphore(max(1, node.params.workers))
         results: dict[str, StepOutcome] = {}
+        # element diff (SPEC §10.5): an input item whose (slug, source_hash)
+        # matches an ok element of the reuse run reuses that element's step.
+        reuse_idx = (
+            reuse.map_reuse_index(reuse_dir, node.id, spec.out_port)
+            if reuse_dir is not None
+            else {}
+        )
 
         async def run_item(item: CollectionItem) -> None:
             step_id = f"{node.id}:{item.slug}"
             existing = ledger.get_step(step_id)
             if existing is not None and existing.status is StepStatus.done:
                 results[item.slug] = existing.outcome or StepOutcome.ok
+                return
+            if reuse_dir is not None and reuse_idx.get(item.slug) == item.source_hash:
+                reuse.copy_tree_linked(
+                    reuse_dir / "steps" / node.id / item.slug,
+                    run_dir / "steps" / node.id / item.slug,
+                )
+                ledger.set_step(
+                    step_id,
+                    node=node.id,
+                    status=StepStatus.reused,
+                    outcome=StepOutcome.ok,
+                )
+                emit_event(
+                    {
+                        "type": "step_state_changed",
+                        "step_id": step_id,
+                        "payload": {"from": "pending", "to": "reused"},
+                    }
+                )
+                results[item.slug] = StepOutcome.ok
                 return
             item_input = MapItemInput(
                 port=spec.mapped_port,
@@ -740,8 +845,7 @@ async def run_pipeline(
         resolve_model=lambda m: resolve_model(m, ledger),
     )
 
-    async def run_node(node_id: str) -> NodeStatus:
-        node = nodes[node_id]
+    async def _execute_node(node: Node) -> NodeStatus:
         if isinstance(node, BuiltinNode):
             return await run_builtin(node)
         if isinstance(node, LoopNode):
@@ -753,6 +857,32 @@ async def run_pipeline(
             return await run_map_node(node)
         if node.map_over is not None:
             return await run_map_over_node(node)
+        return await _run_plain_agent(node)
+
+    async def run_node(node_id: str) -> NodeStatus:
+        node = nodes[node_id]
+        # reuse disposition (SPEC §10.5): reuse candidates (not in R, non-builtin)
+        # are reused wholesale unless an upstream node was recomputed with a change.
+        if (
+            reuse_dir is not None
+            and node_id not in recompute
+            and not isinstance(node, BuiltinNode)
+            and not any(d in changed_nodes for d in deps[node_id])
+            and reusable(node)  # only reuse a node that succeeded in the prior run
+        ):
+            return reuse_node(node)
+        status = await _execute_node(node)
+        if reuse_dir is not None and status is NodeStatus.done:
+            # builtins re-run every rerun but only invalidate downstream if their
+            # output actually changed; any other re-executed node is assumed changed.
+            if isinstance(node, BuiltinNode):
+                if builtin_changed(node):
+                    changed_nodes.add(node_id)
+            else:
+                changed_nodes.add(node_id)
+        return status
+
+    async def _run_plain_agent(node: AgentNode) -> NodeStatus:
         plan = _agent_plan(
             node,
             run_dir=run_dir,
@@ -763,7 +893,7 @@ async def run_pipeline(
         )
         async with semaphore_for(plan.model):
             # flip to running only once actually executing, not while queued
-            set_node(node_id, NodeStatus.running)
+            set_node(node.id, NodeStatus.running)
             step = await execute_agent_step(
                 plan,
                 runtime,
@@ -773,9 +903,9 @@ async def run_pipeline(
                 sleeper=sleeper,
             )
         if step.outcome is StepOutcome.ok:
-            set_node(node_id, NodeStatus.done)
+            set_node(node.id, NodeStatus.done)
             return NodeStatus.done
-        set_node(node_id, NodeStatus.failed, error=step.error)
+        set_node(node.id, NodeStatus.failed, error=step.error)
         return NodeStatus.failed
 
     # Seed from the ledger so resume continues rather than re-running (SPEC §10.5).
@@ -802,10 +932,12 @@ async def run_pipeline(
             resolved[nid] = mapped
     tasks: dict[asyncio.Task[NodeStatus], str] = {}
 
+    _READY = {NodeStatus.done, NodeStatus.reused}
+
     def ready() -> list[str]:
         out = []
         for nid in pending:
-            if all(d in resolved and resolved[d] is NodeStatus.done for d in deps[nid]):
+            if all(resolved.get(d) in _READY for d in deps[nid]):
                 out.append(nid)
         return sorted(out)
 

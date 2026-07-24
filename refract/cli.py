@@ -340,12 +340,16 @@ def run_impl(
     workers_for: dict[str, int] | None = None,
     runtime_factory: RuntimeFactory = _default_runtime_factory,
     run_id: str | None = None,
+    force_nodes: list[str] | None = None,
+    reuse_run_id: str | None = None,
     clock: Callable[[], str] = utcnow_iso,
 ) -> tuple[RunStatus, Path]:
     """Validate, snapshot and execute a pipeline; return ``(status, run_dir)``.
 
     Enforces one active run per project via ``.active.lock`` (§16.1). The runtime
-    is built by ``runtime_factory`` so tests inject :class:`MockRuntime`.
+    is built by ``runtime_factory`` so tests inject :class:`MockRuntime`. When
+    ``reuse_run_id`` is given (via :func:`rerun_impl`) unchanged nodes are reused
+    from that prior run and ``force_nodes`` seeds the recompute set (SPEC §10.5).
     """
     model_overrides = model_overrides or {}
     proj = resolve_project(project_dir, pipeline)
@@ -371,9 +375,17 @@ def run_impl(
     if workers_for:
         _apply_workers(pipeline_obj, workers_for)
 
+    for nid in force_nodes or []:
+        if nid not in {n.id for n in pipeline_obj.nodes}:
+            raise UsageError(f"--from: no node {nid!r} in pipeline")
+
     active = _active_run(proj.runs_dir)
     if active is not None:
         raise ActiveRunConflict(active)
+
+    reuse_run_dir = proj.runs_dir / reuse_run_id if reuse_run_id else None
+    if reuse_run_dir is not None and not (reuse_run_dir / "state.json").exists():
+        raise UsageError(f"--reuse: run {reuse_run_id!r} not found in {proj.runs_dir}")
 
     run_id = run_id or _new_run_id()
     run_dir = proj.runs_dir / run_id
@@ -396,11 +408,14 @@ def run_impl(
         pipeline=proj.pipeline_name,
         node_ids=[n.id for n in exec_pipeline.nodes],
         created_at=clock(),
+        reuse_from=reuse_run_id,
+        force_nodes=force_nodes,
     )
     events = EventWriter(run_dir, clock=clock)
     runtime = runtime_factory(app, exec_pipeline)
 
-    typer.echo(f"run {run_id}: {proj.pipeline_name} ({len(exec_pipeline.nodes)} nodes)")
+    verb = f"rerun {run_id} (reuse {reuse_run_id})" if reuse_run_id else f"run {run_id}"
+    typer.echo(f"{verb}: {proj.pipeline_name} ({len(exec_pipeline.nodes)} nodes)")
     _write_lock(run_dir)
     try:
         status = asyncio.run(
@@ -414,6 +429,7 @@ def run_impl(
                 events=events,
                 provider_limits=app.provider_limits,
                 project_input_dir=proj.input_dir,
+                reuse_run_dir=reuse_run_dir,
                 clock=clock,
             )
         )
@@ -422,6 +438,46 @@ def run_impl(
         _clear_lock(run_dir)
     _print_run_summary(ledger)
     return status, run_dir
+
+
+def _resolve_reuse_run(runs_dir: Path, reuse: str) -> str:
+    """Resolve ``--reuse RUN|last`` to a concrete run id (SPEC §14)."""
+    if reuse != "last":
+        return reuse
+    candidates = sorted(
+        p.name
+        for p in (runs_dir.iterdir() if runs_dir.is_dir() else [])
+        if p.is_dir() and (p / "state.json").exists()
+    )
+    if not candidates:
+        raise UsageError(f"--reuse last: no prior runs in {runs_dir}")
+    return candidates[-1]
+
+
+def rerun_impl(
+    project_dir: Path | str,
+    *,
+    from_node: str,
+    reuse: str = "last",
+    pipeline: str | None = None,
+    app: AppConfig,
+    runtime_factory: RuntimeFactory = _default_runtime_factory,
+    run_id: str | None = None,
+    clock: Callable[[], str] = utcnow_iso,
+) -> tuple[RunStatus, Path]:
+    """Rerun-from-node: a new run reusing unchanged nodes from a prior run (§10.5/§14)."""
+    proj = resolve_project(project_dir, pipeline)
+    reuse_run_id = _resolve_reuse_run(proj.runs_dir, reuse)
+    return run_impl(
+        project_dir,
+        pipeline=pipeline,
+        app=app,
+        runtime_factory=runtime_factory,
+        run_id=run_id,
+        force_nodes=[from_node],
+        reuse_run_id=reuse_run_id,
+        clock=clock,
+    )
 
 
 # --- resume ------------------------------------------------------------------
@@ -666,6 +722,28 @@ def run(
             workers_for=workers,
         )
         return EXIT_OK if status is RunStatus.completed else EXIT_RUN_FAILED
+
+    _run_cli(body)
+
+
+@app.command()
+def rerun(
+    project_dir: Path = typer.Argument(..., help="project directory"),
+    from_node: str = typer.Option(..., "--from", help="node id to recompute from"),
+    reuse: str = typer.Option("last", "--reuse", help="RUN id or 'last'"),
+    pipeline: str | None = typer.Option(None, "--pipeline"),
+) -> None:
+    """Rerun from a node, reusing unchanged upstream nodes from a prior run."""
+
+    def body() -> int:
+        status_, _ = rerun_impl(
+            project_dir,
+            from_node=from_node,
+            reuse=reuse,
+            pipeline=pipeline,
+            app=load_app_config(),
+        )
+        return EXIT_OK if status_ is RunStatus.completed else EXIT_RUN_FAILED
 
     _run_cli(body)
 
