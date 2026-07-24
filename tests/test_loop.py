@@ -18,9 +18,21 @@ from refract.graph import load_agents
 from refract.models.ledger import NodeStatus, RunStatus, StepStatus
 from refract.models.pipeline import Pipeline
 from refract.registry import ArtifactRegistry
+from refract.runtime.base import EventCallback, StepResult, StepSpec
 from refract.runtime.mock import MockRuntime, ScriptedResponse
 from refract.scheduler import run_pipeline
 from refract.state import Ledger
+
+
+class _BoomRuntime:
+    """Fails the test if any step is executed (used to prove reuse on resume)."""
+
+    async def run_step(self, spec: StepSpec, on_event: EventCallback) -> StepResult:
+        raise AssertionError(f"step {spec.step_id} should not run on resume")
+
+    async def close(self) -> None:
+        return None
+
 
 DOC1 = "# Requirements: v1\n- FR-1 alpha\n"
 DOC2 = "# Requirements: v2\n- FR-1 beta\n"
@@ -299,3 +311,44 @@ def test_invalid_verdict_fails_gate(tmp_path: Path) -> None:
     assert status is RunStatus.failed
     assert ledger.get_node("refine").status is NodeStatus.failed
     assert ledger.get_step("refine.critic:r1").status is StepStatus.failed
+
+
+def test_resume_reuses_done_rounds_from_ledger(tmp_path: Path) -> None:
+    # SPEC §10.5 / §18: round is derived from the ledger; resuming a loop whose
+    # sub-steps are all done re-walks the rounds WITHOUT re-executing any step.
+    _, agents, reg = _library(tmp_path)
+    pl = _loop_pipeline(max_rounds=3, on_max_rounds="pass")
+    scenario = {
+        "refine.body:r1": [ScriptedResponse(files={"doc.md": DOC1})],
+        "refine.critic:r1": [
+            ScriptedResponse(files={"verdict.json": _verdict("revise")})
+        ],
+        "refine.body:r2": [ScriptedResponse(files={"doc.md": DOC2})],
+        "refine.critic:r2": [
+            ScriptedResponse(files={"verdict.json": _verdict("approved")})
+        ],
+    }
+    status, ledger, run_dir = _run(tmp_path, pl, agents, reg, scenario)
+    assert status is RunStatus.completed
+
+    # simulate a resume: the node is re-scheduled but every sub-step is done.
+    ledger.set_node_status("refine", NodeStatus.pending, error=None)
+    ledger.save()
+    reloaded = Ledger.load(run_dir)
+    events = EventWriter(run_dir)
+    status2 = asyncio.run(
+        run_pipeline(
+            run_dir,
+            pipeline=pl,
+            agents=agents,
+            registry=reg,
+            runtime=_BoomRuntime(),  # raises if any step re-executes
+            ledger=reloaded,
+            events=events,
+            clock=lambda: "T",
+            sleeper=_no_sleep,
+        )
+    )
+    assert status2 is RunStatus.completed
+    assert reloaded.get_node("refine").status is NodeStatus.done
+    assert (run_dir / "steps" / "refine" / "_out" / "doc.md").read_text("utf-8") == DOC2

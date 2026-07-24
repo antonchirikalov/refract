@@ -496,8 +496,12 @@ def _assemble_select_output(
         if payload is not None:
             link_or_copy(payload, out_dir / artifact_filename("out", rtype))
     elif win_dir.is_dir():
+        # dir/any: the port is a directory ``out/`` so a downstream consumer
+        # resolving ``<select>.out`` finds it at ``_out/out/`` (mirror of loop).
+        dst = out_dir / "out"
+        dst.mkdir(parents=True, exist_ok=True)
         for child in sorted(win_dir.iterdir()):
-            link_or_copy(child, out_dir / child.name)
+            link_or_copy(child, dst / child.name)
 
 
 def _select_inner_type(ctx: MetaContext, node: SelectNode) -> str | None:

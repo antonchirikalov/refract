@@ -454,8 +454,8 @@ async def run_pipeline(
     deps = node_dependencies(pipeline)
 
     # Reject unsupported node kinds up front so scheduling never starts a run it
-    # cannot finish cleanly (I10). Supported: plain/map agent nodes, builtins,
-    # and loop/select meta-nodes. ``map_over`` (models fan-out) is not yet.
+    # cannot finish cleanly (I10). Supported: agent nodes (plain / map / map_over),
+    # builtins, and loop/select meta-nodes.
     for nid, node in nodes.items():
         supported_agent = isinstance(node, AgentNode)
         supported_meta = isinstance(node, LoopNode | SelectNode)
@@ -584,8 +584,8 @@ async def run_pipeline(
     async def run_map_node(node: AgentNode) -> NodeStatus:
         """Fan a map node out over its input collection, one step per ok item (§10.3)."""
         agent = agents[node.agent]
-        model = node.params.model
-        assert model is not None
+        assert node.params.model is not None
+        model = resolve_model(node.params.model, ledger)
         spec = _map_binding(node, agent, nodes, registry, run_dir)
         shared = _build_inputs(node, run_dir, agents, registry, nodes)
         manifest = _read_collection(spec.input_dir)

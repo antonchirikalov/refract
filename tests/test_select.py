@@ -263,3 +263,51 @@ def test_zero_ok_candidates_fails(tmp_path: Path) -> None:
 def test_model_slug_mapping() -> None:
     # winner_model reconstruction relies on this (used once map_over lands).
     assert model_slug("kimi/kimi-k3") == "kimi_kimi-k3"
+
+
+def test_dir_any_winner_assembled_under_out_dir(tmp_path: Path) -> None:
+    # SPEC §10.3/§10.4: for a dir/any element type X, the winner payload must land
+    # at _out/out/ (the port dir), where a downstream consumer of <select>.out
+    # looks — not scattered into _out/ root. Candidates = scanner's
+    # collection<source@v1> (source@v1 is kind: any).
+    lib = tmp_path / "library"
+    (lib / "types" / "schemas").mkdir(parents=True)
+    (lib / "types" / "artifact_types.yaml").write_text(_TYPES, encoding="utf-8")
+    _mk_agent(
+        lib,
+        "srcsel",
+        [{"port": "cands", "type": "collection<source@v1>"}],
+        [{"port": "choice", "type": "selection@v1"}],
+    )
+    agents, errs = load_agents(lib)
+    assert errs == []
+    reg = ArtifactRegistry.load(lib)
+    pl = Pipeline.model_validate(
+        {
+            "version": "0.1",
+            "name": "pick",
+            "nodes": [
+                {"id": "scan", "type": "builtin/scanner"},
+                {
+                    "id": "choose",
+                    "type": "select",
+                    "candidates": "scan.sources",
+                    "selector": {"agent": "srcsel@1", "model": "kimi/kimi-k3"},
+                    "params": {"fallback": "first_ok"},
+                },
+            ],
+        }
+    )
+    status, ledger, run_dir = _run(
+        tmp_path,
+        pl,
+        agents,
+        reg,
+        {"choose.selector": [ScriptedResponse(files={"choice.json": _sel("b-txt")})]},
+        n_inputs=2,
+    )
+    assert status is RunStatus.completed
+    assert ledger.get_node("choose").winner == "b-txt"
+    out = run_dir / "steps" / "choose" / "_out" / "out"
+    assert out.is_dir()  # the port dir, not scattered into _out/ root
+    assert (out / "b.txt").exists()

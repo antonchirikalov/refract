@@ -27,6 +27,7 @@ MODELS = ["kimi/kimi-k3", "openai/gpt-5.6"]
 _TYPES = """
 version: "0.1"
 types:
+  source@v1: { kind: any }
   requirements@v1:
     kind: file
     format: markdown
@@ -74,6 +75,12 @@ def _library(tmp_path: Path) -> tuple:
         [{"port": "draft", "type": "requirements@v1"}],
         [{"port": "doc", "type": "requirements@v1"}],
     )
+    _mk(
+        lib,
+        "proc",
+        [{"port": "src", "type": "source@v1"}],
+        [{"port": "doc", "type": "requirements@v1"}],
+    )
     agents, errs = load_agents(lib)
     assert errs == []
     return lib, agents, ArtifactRegistry.load(lib)
@@ -85,6 +92,8 @@ def _run(
     agents: dict,
     registry: ArtifactRegistry,
     scenario: dict,
+    *,
+    n_inputs: int = 0,
 ) -> tuple[RunStatus, Ledger, Path]:
     lib = tmp_path / "library"
     run_dir = tmp_path / "run"
@@ -93,6 +102,14 @@ def _run(
         shutil.copytree(
             lib / "agents" / ref.split("@")[0], run_dir / "snapshot" / "agents" / ref
         )
+    project_input: Path | None = None
+    if n_inputs:
+        project_input = tmp_path / "input"
+        project_input.mkdir()
+        for i in range(n_inputs):
+            (project_input / f"{chr(ord('a') + i)}.txt").write_text(
+                f"src {i}", encoding="utf-8"
+            )
     ledger = Ledger.create(
         run_dir,
         run_id="r",
@@ -110,6 +127,7 @@ def _run(
             runtime=MockRuntime(scenario),
             ledger=ledger,
             events=events,
+            project_input_dir=project_input,
             clock=lambda: "T",
             sleeper=_no_sleep,
         )
@@ -227,4 +245,55 @@ def test_winner_model_binding_end_to_end(tmp_path: Path) -> None:
     assert ledger.get_node("choose").winner_model == "openai/gpt-5.6"
     # the refine step ran with the winner_model-resolved model
     raw = (run_dir / "steps" / "refine" / "main" / "raw.txt").read_text("utf-8")
+    assert "openai/gpt-5.6" in raw
+
+
+def test_map_node_model_resolves_winner_model_binding(tmp_path: Path) -> None:
+    # A plain map node (source = scanner, not map_over) with a winner_model
+    # binding must resolve the model per element (SPEC §8.1). Two branches:
+    # design(map_over)→choose(select) yields winner_model; scan→proc(map) binds it.
+    _, agents, reg = _library(tmp_path)
+    pl = Pipeline.model_validate(
+        {
+            "version": "0.1",
+            "name": "sd",
+            "nodes": [
+                _design_node(),
+                {
+                    "id": "choose",
+                    "type": "select",
+                    "candidates": "design.design",
+                    "selector": {"agent": "sel@1", "model": "kimi/kimi-k3"},
+                    "params": {"fallback": "fail"},
+                },
+                {"id": "scan", "type": "builtin/scanner"},
+                {
+                    "id": "proc",
+                    "type": "agent",
+                    "agent": "proc@1",
+                    "map": "scan.sources",
+                    "params": {"model": "@choose.winner_model", "workers": 2},
+                },
+            ],
+        }
+    )
+    status, ledger, run_dir = _run(
+        tmp_path,
+        pl,
+        agents,
+        reg,
+        {
+            "design:*": [ScriptedResponse(files={"design.md": DOC})],
+            "choose.selector": [
+                ScriptedResponse(
+                    files={"choice.json": json.dumps({"winner": "openai_gpt-5-6"})}
+                )
+            ],
+            "proc:*": [ScriptedResponse(files={"doc.md": DOC})],
+        },
+        n_inputs=2,
+    )
+    assert status is RunStatus.completed
+    # each map element step ran with the winner_model-resolved model
+    raw = (run_dir / "steps" / "proc" / "a-txt" / "raw.txt").read_text("utf-8")
     assert "openai/gpt-5.6" in raw
