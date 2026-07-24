@@ -21,12 +21,15 @@ servers:
     env: {}   # see keys below — prefer inheriting from the run env, not inlining
 ```
 
-**Keys (I8):** paperbanana needs `GOOGLE_API_KEY` (Gemini image/VLM) and/or
-`OPENAI_API_KEY`. Do NOT inline the value here. refract runs the step with the
-run-level env (union of snapshot provider keys + used agents' MCP tokens), and the
-stdio server inherits it — so having the key exported in the run environment is
-enough. Only add it under `env:` if you must override, and even then reference an
-env var rather than a literal secret.
+**Keys (I8):** the paperbanana MCP's default image backend is Gemini and it
+**requires `GOOGLE_API_KEY`** (observed at runtime: with only `OPENAI_API_KEY`
+set, `generate_diagram` fails with "missing API key … obtain a Google API key").
+To use the OpenAI image backend instead, configure paperbanana's provider via its
+own env (e.g. `OPENAI_BASE_URL` and related overrides — see the paperbanana repo)
+in the `env:` block below. Do NOT inline secret values — refract runs the step
+with the run-level env and the stdio MCP server inherits it, so exporting the
+right key in the run environment is enough; reference an env var if you must set
+one under `env:`.
 
 ## Tools the server exposes (illustrator uses these)
 
