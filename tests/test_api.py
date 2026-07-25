@@ -64,7 +64,11 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("MOONSHOT_API_KEY", "sk-test")
     projects_root = tmp_path / "projects"
     projects_root.mkdir()
-    shutil.copytree(DEMO_PROJECT, projects_root / "demo-project")
+    shutil.copytree(
+        DEMO_PROJECT,
+        projects_root / "demo-project",
+        ignore=shutil.ignore_patterns("runs"),
+    )
     api = create_app(
         projects_root=projects_root,
         app_config=_app_config(),

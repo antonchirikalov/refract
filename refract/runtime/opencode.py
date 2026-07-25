@@ -228,7 +228,10 @@ class _TurnSnapshot:
 
 
 def _events_from_parts(
-    step_id: str, parts: list[dict[str, object]]
+    step_id: str,
+    parts: list[dict[str, object]],
+    *,
+    fallback: str = "opencode message complete",
 ) -> list[dict[str, object]]:
     """Turn an opencode message's parts into trace events (I9 / SPEC §9).
 
@@ -269,7 +272,7 @@ def _events_from_parts(
             {
                 "type": "log",
                 "step_id": step_id,
-                "payload": {"level": "info", "message": "opencode message complete"},
+                "payload": {"level": "info", "message": fallback},
             }
         )
     return events
@@ -369,8 +372,8 @@ class OpencodeRuntime:
                             # body can carry no parts, so keep the polled ones.
                             snapshot.absorb(body.get("info"), body.get("parts"))
                             break
-                        if snapshot.completed:
-                            break
+                        if snapshot.completed or snapshot.info.get("error"):
+                            break  # no point waiting out the timeout on an error
                 finally:
                     if not post.done():
                         post.cancel()
@@ -393,7 +396,15 @@ class OpencodeRuntime:
             self._write_trace(
                 spec,
                 snapshot.text or "[opencode: step timed out with no reply]",
-                _events_from_parts(spec.step_id, snapshot.parts),
+                _events_from_parts(
+                    spec.step_id,
+                    snapshot.parts,
+                    fallback=(
+                        "opencode step timed out; the server recorded no assistant "
+                        "reply (seen when the provider stalls, e.g. a quota error "
+                        "opencode never surfaces)"
+                    ),
+                ),
             )
             raise
         except Exception as exc:  # server/transport failure → infra error (retryable)

@@ -443,7 +443,7 @@ class TestRerunImplEndToEnd:
         library_path = REPO_ROOT / "library"
         demo_project = REPO_ROOT / "examples" / "demo-project"
         project = tmp_path / "demo-project"
-        shutil.copytree(demo_project, project)
+        shutil.copytree(demo_project, project, ignore=shutil.ignore_patterns("runs"))
 
         providers = ProvidersFile.model_validate(
             {

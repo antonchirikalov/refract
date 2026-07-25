@@ -67,8 +67,10 @@ def _app(
 
 
 def _copy_demo_project(tmp_path: Path) -> Path:
+    # runs/ is skipped: a developer's real run in examples/ (live opencode,
+    # .opencode/node_modules, files still open) otherwise breaks the copy.
     dest = tmp_path / "demo-project"
-    shutil.copytree(DEMO_PROJECT, dest)
+    shutil.copytree(DEMO_PROJECT, dest, ignore=shutil.ignore_patterns("runs"))
     return dest
 
 

@@ -69,3 +69,9 @@ class TestEventsFromParts:
     def test_empty_parts_still_yield_one_record(self) -> None:
         # agent.events.jsonl must never be an empty file (I9).
         assert len(_events_from_parts("write", [])) == 1
+
+    def test_fallback_message_is_caller_supplied(self) -> None:
+        # A timed-out step must not be described as "message complete" — that
+        # claim sent a live investigation down the wrong path.
+        events = _events_from_parts("write", [], fallback="timed out, no reply")
+        assert events[0]["payload"]["message"] == "timed out, no reply"  # type: ignore[index]
