@@ -202,6 +202,7 @@ export function Run({ project, runId }: { project: string; runId: string }) {
         <Graph
           graph={graph}
           statuses={statuses}
+          steps={state?.steps}
           onSelect={setSelected}
           selected={selected}
         />

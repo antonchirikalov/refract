@@ -95,6 +95,12 @@ export interface RunState {
   steps: Record<string, StepState>
 }
 
+export interface GraphBlock {
+  role: 'body' | 'critic' | 'selector'
+  agent: string
+  model: string | null
+}
+
 export interface GraphNode {
   id: string
   type: string
@@ -102,6 +108,9 @@ export interface GraphNode {
   needs: string[]
   fan_out: 'map' | 'map_over' | null
   models: string[]
+  blocks: GraphBlock[]
+  candidate_models: string[]
+  facts: Record<string, string>
   checkpoint: boolean
 }
 

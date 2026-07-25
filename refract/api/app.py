@@ -175,6 +175,14 @@ class PipelineWriteResponse(BaseModel):
     warnings: list[ValidationError] = Field(default_factory=list)
 
 
+class GraphBlock(BaseModel):
+    """One agent inside a meta-node — a loop's body/critic, a select's selector."""
+
+    role: str  # body | critic | selector
+    agent: str
+    model: str | None = None
+
+
 class GraphNode(BaseModel):
     id: str
     type: str
@@ -184,6 +192,12 @@ class GraphNode(BaseModel):
     # effective models (resolved like the snapshot does, §7): one per node, several
     # for map_over — the UI badges the provider so you can see what runs where
     models: list[str] = Field(default_factory=list)
+    # a meta-node's inner agents, so the UI can draw it as a container (SPEC-UI §4)
+    blocks: list[GraphBlock] = Field(default_factory=list)
+    # the models a select is choosing between (its candidates' producer, §10.3)
+    candidate_models: list[str] = Field(default_factory=list)
+    # a short, renderable summary of what shapes the node: rounds, fallback, workers
+    facts: dict[str, str] = Field(default_factory=dict)
     checkpoint: bool = False
 
 
@@ -702,6 +716,18 @@ def create_app(
                 for cap in spec.needs if spec else []:
                     if cap not in needs:
                         needs.append(cap)
+            resolved_node = next(
+                (
+                    n
+                    for n in resolved_nodes
+                    if isinstance(n, dict) and n["id"] == node.id
+                ),
+                {},
+            )
+            candidates: list[str] = []
+            if isinstance(node, SelectNode):
+                ref = node.candidates.partition(".")[0]
+                candidates = models_by_node.get(ref, [])
             nodes.append(
                 GraphNode(
                     id=node.id,
@@ -710,6 +736,9 @@ def create_app(
                     needs=needs,
                     fan_out=_node_fan_out(node),
                     models=models_by_node.get(node.id, []),
+                    blocks=_node_blocks(node, resolved_node),
+                    candidate_models=candidates,
+                    facts=_node_facts(node, resolved_node),
                     checkpoint=node.id in checkpoints,
                 )
             )
@@ -1067,6 +1096,43 @@ def _node_models(resolved_node: dict[str, Any]) -> list[str]:
             if isinstance(model, str) and model and model not in out:
                 out.append(model)
     return out
+
+
+def _node_blocks(node: Node, resolved: dict[str, Any]) -> list[GraphBlock]:
+    """The agents a meta-node runs inside itself, with their effective models."""
+    roles: list[tuple[str, str]] = []
+    if isinstance(node, LoopNode):
+        roles = [("body", node.body.agent), ("critic", node.critic.agent)]
+    elif isinstance(node, SelectNode):
+        roles = [("selector", node.selector.agent)]
+    out: list[GraphBlock] = []
+    for role, agent in roles:
+        block = resolved.get(role)
+        model = block.get("model") if isinstance(block, dict) else None
+        out.append(
+            GraphBlock(
+                role=role, agent=agent, model=model if isinstance(model, str) else None
+            )
+        )
+    return out
+
+
+def _node_facts(node: Node, resolved: dict[str, Any]) -> dict[str, str]:
+    """Params worth showing on the node itself (SPEC §8.2), as short strings."""
+    params = resolved.get("params")
+    p = params if isinstance(params, dict) else {}
+    facts: dict[str, str] = {}
+    if isinstance(node, LoopNode):
+        facts["rounds"] = f"≤{p.get('max_rounds', 3)}"
+        facts["on max"] = str(p.get("on_max_rounds", "pass"))
+    elif isinstance(node, SelectNode):
+        facts["fallback"] = str(p.get("fallback", "first_ok"))
+    elif isinstance(node, DiscoverNode):
+        facts["min sources"] = str(p.get("min_sources", 1))
+    elif isinstance(node, AgentNode) and (node.map or node.map_over):
+        facts["workers"] = str(p.get("workers", 3))
+        facts["min ok"] = str(p.get("min_ok", 1))
+    return facts
 
 
 def _node_fan_out(node: Node) -> str | None:

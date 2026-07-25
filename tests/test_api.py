@@ -721,3 +721,46 @@ def test_graph_nodes_carry_effective_models_and_checkpoints(
     assert nodes["scan"]["models"] == []  # a builtin runs no model
     assert nodes["scan"]["checkpoint"] is True
     assert nodes["write"]["checkpoint"] is False
+
+
+def test_graph_exposes_meta_node_internals(client: TestClient, tmp_path: Path) -> None:
+    # A loop IS a body and a critic, and a select IS a selector choosing between the
+    # candidates' models — the UI draws them as containers, so the graph has to say
+    # what is inside (SPEC-UI §4).
+    project = tmp_path / "projects" / "sd"
+    (project / "pipelines").mkdir(parents=True)
+    (project / "input").mkdir()
+    (project / "project.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": "0.1",
+                "name": "sd",
+                "input": "./input",
+                "defaults": {"model": "kimi/kimi-k3"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        REPO_ROOT / "library" / "templates" / "solution_design.yaml",
+        project / "pipelines" / "sd.yaml",
+    )
+
+    graph = client.get("/api/projects/sd/pipelines/sd/graph").json()
+    nodes = {n["id"]: n for n in graph["nodes"]}
+
+    refine = nodes["refine"]
+    assert [b["role"] for b in refine["blocks"]] == ["body", "critic"]
+    assert refine["blocks"][0]["agent"] == "requirements_writer@1"
+    assert refine["blocks"][0]["model"] == "kimi/kimi-k3"  # inherited default
+    assert refine["facts"]["rounds"] == "≤3"
+
+    choose = nodes["choose"]
+    assert [b["role"] for b in choose["blocks"]] == ["selector"]
+    # what the select is choosing between: the candidate producer's map_over models
+    assert choose["candidate_models"] == ["kimi/kimi-k3", "openai/gpt-5.6"]
+    assert choose["facts"]["fallback"] == "first_ok"
+
+    # a winner_model binding stays a binding, not a fake provider
+    sd_refine = nodes["sd_refine"]
+    assert sd_refine["blocks"][0]["model"] == "@choose.winner_model"
