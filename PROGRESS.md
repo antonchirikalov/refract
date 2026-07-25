@@ -10,6 +10,26 @@ clean). Remaining before the phase can be *signed off*: manual smoke on real ope
 (the OpencodeRuntime execution half + `docs/opencode-smoke.md` are Phase 1). **Next: Phase
 1** — metanodes (loop/select), map_over, winner_model binding, rerun/reuse. (SPEC §17)
 
+## Live Extract validation (2026-07-25)
+
+First real Extract run (`examples/extract-project`, 2 synthetic sources, real
+opencode 1.18.4): scan → map(2) → loop worked end to end on the engine level —
+type gates, verdicts, round derivation from the ledger, snapshot isolation, reuse.
+Six defects it exposed, each fixed with a test:
+
+| Fix | What the run showed |
+|---|---|
+| `fix(events)` | `resume` restarted `seq` at 1 → duplicate seq + WS `?from_seq=` replay silently hid every post-resume event |
+| `fix(scanner)` | `init`'s `input/.gitkeep` became a source; map spent an LLM call extracting an empty file |
+| `feat(cli)` | §14 promised stdout heartbeats; `run` was silent for minutes and looked hung |
+| `fix(library)` | critic got no `extracts` (traceability unverifiable) and invented structural demands → loop could never converge |
+| `fix(opencode)` | `POST /session/../message` is not a completion signal (it outlived a finished turn); trace was never written on the timeout path (I9) |
+| `fix(tests)` | fixtures copied `examples/**/runs`, so a developer's real run broke 13 tests |
+
+Provider note: `openai` quota ran out mid-run (`429 insufficient_quota`), and
+opencode hangs on it rather than failing — a stalled step is a provider symptom
+worth checking before suspecting the engine.
+
 ## Phase status
 
 | Phase | Scope (SPEC §17) | Status |

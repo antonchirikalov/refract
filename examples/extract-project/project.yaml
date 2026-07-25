@@ -1,0 +1,5 @@
+version: '0.1'
+name: Extract Smoke
+input: ./input
+defaults:
+  model: kimi/k3
