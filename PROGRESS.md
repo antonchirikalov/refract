@@ -26,9 +26,26 @@ Six defects it exposed, each fixed with a test:
 | `fix(opencode)` | `POST /session/../message` is not a completion signal (it outlived a finished turn); trace was never written on the timeout path (I9) |
 | `fix(tests)` | fixtures copied `examples/**/runs`, so a developer's real run broke 13 tests |
 
-Provider note: `openai` quota ran out mid-run (`429 insufficient_quota`), and
-opencode hangs on it rather than failing — a stalled step is a provider symptom
-worth checking before suspecting the engine.
+Extract then completed on `kimi/k3`: `refine` approved in round 1, extract steps
+reused (no LLM calls), 27 FR/NFR in the final document, I8 clean, no surviving
+`opencode serve`.
+
+**Discovery** (`examples/discovery-project`, same two sources) ran scan → map(2) →
+loop → probe on real opencode; `arch_probe` produced 41 workshop questions anchored
+to concrete FR/constraint numbers. `discover` (arch_critic) then failed on the
+provider's billing limit, so the last node is **not yet verified live** — its two
+fixes below are covered by the MockRuntime template e2e test only:
+
+| Fix | What the run showed |
+|---|---|
+| `fix(discovery)` arch_critic | curates against "the source" but was wired with the draft only — now consumes `requirements@v1` too |
+| `fix(discovery)` error summary | opencode's provider error (whole HTTP response, `set-cookie` included) was persisted in `state.json` and printed by `refract status` |
+
+Provider note: both providers hit limits during this session — `openai` returns
+`429 insufficient_quota` (opencode **hangs** on it rather than failing, so a stalled
+step with an empty `output/` is a provider symptom, not an engine bug), `kimi`
+returns `403` with a billing message (that one surfaces correctly as
+`failed_agent`). Probe the provider directly before suspecting the engine.
 
 ## Phase status
 
