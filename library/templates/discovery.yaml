@@ -15,7 +15,7 @@ nodes:
 
   - id: refine
     type: loop
-    params: { max_rounds: 3, model: "kimi/kimi-k3" }
+    params: { max_rounds: 3 }
     body:
       agent: requirements_writer@1
       inputs: { extracts: extract.extract }
