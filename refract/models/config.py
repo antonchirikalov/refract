@@ -34,12 +34,23 @@ class ProjectConfig(BaseModel):
 
 
 class ProviderConfig(BaseModel):
-    """One provider entry (SPEC §7). Key = model prefix up to the first ``/``."""
+    """One provider entry (SPEC §7). Key = model prefix up to the first ``/``.
+
+    ``api_key_env``/``max_concurrent`` are all a built-in opencode provider
+    (e.g. ``openai``) needs. A custom / OpenAI-compatible provider (e.g. Kimi via
+    Moonshot) also needs ``npm`` (the ai-sdk package) and ``base_url``; ``models``
+    is the catalog of model-ids offered under this provider — required for
+    OpenAI-compatible providers to expose their models, and the menu agents pick
+    from when assigning ``model:`` per node.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     api_key_env: str
     max_concurrent: int = 4
+    npm: str | None = None
+    base_url: str | None = None
+    models: list[str] = Field(default_factory=list)
 
 
 class ProvidersFile(BaseModel):

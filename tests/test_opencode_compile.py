@@ -210,6 +210,44 @@ def test_build_opencode_config_no_provider_entry_when_unknown() -> None:
     assert "provider" not in config
 
 
+def test_build_opencode_config_builtin_provider_omits_npm_and_baseurl() -> None:
+    # A built-in provider (only api_key_env) emits just the apiKey option.
+    providers = ProvidersFile.model_validate(
+        {"providers": {"openai": {"api_key_env": "OPENAI_API_KEY"}}}
+    )
+    config = build_opencode_config(
+        model="openai/gpt-5.6", needs=[], providers=providers, mcp=make_mcp()
+    )
+    block = config["provider"]["openai"]  # type: ignore[index]
+    assert block == {"options": {"apiKey": "{env:OPENAI_API_KEY}"}}
+
+
+def test_build_opencode_config_custom_provider_emits_npm_baseurl_models() -> None:
+    # An OpenAI-compatible provider (Kimi/Moonshot) needs npm + baseURL + models
+    # so opencode can reach it and expose the model-ids agents assign.
+    providers = ProvidersFile.model_validate(
+        {
+            "providers": {
+                "kimi": {
+                    "api_key_env": "MOONSHOT_API_KEY",
+                    "npm": "@ai-sdk/openai-compatible",
+                    "base_url": "https://api.moonshot.ai/v1",
+                    "models": ["kimi-k2.7-code", "kimi-k2.6"],
+                }
+            }
+        }
+    )
+    config = build_opencode_config(
+        model="kimi/kimi-k2.7-code", needs=[], providers=providers, mcp=make_mcp()
+    )
+    block = config["provider"]["kimi"]  # type: ignore[index]
+    assert block["npm"] == "@ai-sdk/openai-compatible"
+    assert block["options"]["baseURL"] == "https://api.moonshot.ai/v1"  # type: ignore[index]
+    assert block["options"]["apiKey"] == "{env:MOONSHOT_API_KEY}"  # type: ignore[index]
+    # models become explicit opencode entries
+    assert block["models"] == {"kimi-k2.7-code": {}, "kimi-k2.6": {}}
+
+
 # ---------------------------------------------------------------------------
 # opencode.json: mcp servers
 # ---------------------------------------------------------------------------

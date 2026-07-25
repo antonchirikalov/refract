@@ -255,8 +255,15 @@ confirm_tier: dangerous    # and/or every capability at/above this tier
 ```yaml
 # providers.yaml — ключ провайдера = префикс модели до первого "/"
 providers:
-  kimi:    { api_key_env: MOONSHOT_API_KEY, max_concurrent: 4 }
-  openai:  { api_key_env: OPENAI_API_KEY,   max_concurrent: 4 }
+  # встроенный в opencode провайдер — достаточно ключа
+  openai: { api_key_env: OPENAI_API_KEY, max_concurrent: 4, models: [gpt-5.6] }
+  # OpenAI-совместимый провайдер (Kimi/Moonshot) — нужны npm + base_url + каталог
+  kimi:
+    api_key_env: MOONSHOT_API_KEY
+    max_concurrent: 4
+    npm: "@ai-sdk/openai-compatible"
+    base_url: "https://api.moonshot.ai/v1"
+    models: [kimi-k2.7-code, kimi-k2.6]
 library_path: /path/to/refract/library
 
 # mcp.yaml
@@ -267,6 +274,13 @@ servers:
 
 Строка модели: `provider/model-id`; `provider` обязан быть ключом `providers`;
 провайдер «доступен», если env-переменная непуста.
+
+> CHANGED (2026-07-25): `ProviderConfig` расширен опциональными `npm` / `base_url` /
+> `models`. Встроенным провайдерам opencode (openai) хватает `api_key_env`; кастомным /
+> OpenAI-совместимым (Kimi через Moonshot) нужны `npm` (пакет ai-sdk) и `base_url`, а
+> `models` — каталог model-id этого провайдера (нужен opencode для OpenAI-совместимых и
+> служит меню, из которого ноды назначают `model:`). Адаптер прокидывает их в
+> per-step `opencode.json` (§12); секреты — только через `{env:VAR}` (I8).
 
 **Приоритет модели** для agent-шага: (1) оверрайды запуска (`--model-for KEY=MODEL`,
 KEY = `node_id` | `node_id.body` | `node_id.critic` | `node_id.selector`) →

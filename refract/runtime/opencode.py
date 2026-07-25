@@ -118,9 +118,15 @@ def build_opencode_config(
     }
     pcfg = providers.providers.get(provider)
     if pcfg is not None:
-        config["provider"] = {
-            provider: {"options": {"apiKey": f"{{env:{pcfg.api_key_env}}}"}}
-        }
+        options: dict[str, object] = {"apiKey": f"{{env:{pcfg.api_key_env}}}"}
+        if pcfg.base_url:
+            options["baseURL"] = pcfg.base_url
+        pblock: dict[str, object] = {"options": options}
+        if pcfg.npm:  # custom / OpenAI-compatible providers need the ai-sdk package
+            pblock["npm"] = pcfg.npm
+        if pcfg.models:  # opencode wants explicit model entries for such providers
+            pblock["models"] = {m: {} for m in pcfg.models}
+        config["provider"] = {provider: pblock}
     mcp_out: dict[str, object] = {}
     for server_name in _mcp_servers_for_needs(needs):
         server = mcp.servers.get(server_name)

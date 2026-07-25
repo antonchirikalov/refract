@@ -1,11 +1,24 @@
 # ~/.refract/providers.yaml  (copy to your $REFRACT_HOME, default ~/.refract)
 #
-# Maps each provider (the prefix of a model string before "/") to the NAME of the
-# env var holding its API key — the key itself never lives in this file (I8).
-# `library_path` points refract at the agent/type library.
+# Registry of the providers (and their models) that pipelines can assign to agents.
+# The key is the model-string prefix before "/". The API key itself never lives
+# here — only the NAME of the env var that holds it (I8). `library_path` points
+# refract at the agent/type library.
 
 providers:
-  openai: { api_key_env: OPENAI_API_KEY, max_concurrent: 4 }
-  # kimi:  { api_key_env: MOONSHOT_API_KEY, max_concurrent: 4 }   # needs baseURL/npm in opencode for a custom provider
+  # Built-in opencode provider — needs only the key env.
+  openai:
+    api_key_env: OPENAI_API_KEY
+    max_concurrent: 4
+    models: [gpt-5.6]
+
+  # OpenAI-compatible provider (Kimi / Moonshot). Custom providers also need the
+  # ai-sdk `npm` package and `base_url`, plus an explicit `models` catalog.
+  kimi:
+    api_key_env: MOONSHOT_API_KEY
+    max_concurrent: 4
+    npm: "@ai-sdk/openai-compatible"
+    base_url: "https://api.moonshot.ai/v1"
+    models: [kimi-k2.7-code, kimi-k2.6]
 
 library_path: /absolute/path/to/refract/library
