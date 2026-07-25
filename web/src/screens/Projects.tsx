@@ -65,7 +65,7 @@ export function Projects() {
                   {card.pipelines.join(', ') || 'no pipeline yet'}
                 </p>
                 {card.lastRun ? (
-                  <p className={`status is-${card.lastRun.status}`}>
+                  <p className={`pill is-${card.lastRun.status}`}>
                     {card.lastRun.awaiting_checkpoint
                       ? `parked at ${card.lastRun.awaiting_checkpoint} — open to continue`
                       : `last run ${card.lastRun.status}`}{' '}

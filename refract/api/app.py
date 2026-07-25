@@ -181,6 +181,10 @@ class GraphNode(BaseModel):
     agents: list[str] = Field(default_factory=list)
     needs: list[str] = Field(default_factory=list)
     fan_out: str | None = None  # "map" | "map_over" | None
+    # effective models (resolved like the snapshot does, §7): one per node, several
+    # for map_over — the UI badges the provider so you can see what runs where
+    models: list[str] = Field(default_factory=list)
+    checkpoint: bool = False
 
 
 class GraphEdge(BaseModel):
@@ -672,6 +676,22 @@ def create_app(
                 ],
             )
         agents, _ = load_agents(st.app_config.library_path)
+        raw_config = yaml.safe_load((pdir / "project.yaml").read_text("utf-8")) or {}
+        from refract.models.config import ProjectConfig
+        from refract.snapshot import build_resolved
+
+        resolved = build_resolved(
+            graph.pipeline,
+            agents=agents,
+            overrides={},
+            default_model=ProjectConfig.model_validate(raw_config).defaults.model,
+        )
+        resolved_nodes = resolved["nodes"]
+        assert isinstance(resolved_nodes, list)
+        models_by_node = {
+            str(n["id"]): _node_models(n) for n in resolved_nodes if isinstance(n, dict)
+        }
+        checkpoints = set(graph.pipeline.checkpoints)
         nodes: list[GraphNode] = []
         edges: list[GraphEdge] = []
         for node in graph.pipeline.nodes:
@@ -689,6 +709,8 @@ def create_app(
                     agents=refs,
                     needs=needs,
                     fan_out=_node_fan_out(node),
+                    models=models_by_node.get(node.id, []),
+                    checkpoint=node.id in checkpoints,
                 )
             )
             for source, port in _node_sources(node):
@@ -1030,6 +1052,21 @@ def _node_agent_refs(node: Node) -> list[str]:
     if isinstance(node, SelectNode):
         return [node.selector.agent]
     return []
+
+
+def _node_models(resolved_node: dict[str, Any]) -> list[str]:
+    """Effective model(s) of a resolved node — several only for ``map_over``."""
+    over = resolved_node.get("map_over")
+    if isinstance(over, dict) and isinstance(over.get("models"), list):
+        return [str(m) for m in over["models"]]
+    out: list[str] = []
+    for holder in ("params", "body", "critic", "selector"):
+        block = resolved_node.get(holder)
+        if isinstance(block, dict):
+            model = block.get("model")
+            if isinstance(model, str) and model and model not in out:
+                out.append(model)
+    return out
 
 
 def _node_fan_out(node: Node) -> str | None:

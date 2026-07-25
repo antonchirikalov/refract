@@ -701,3 +701,23 @@ def test_artifacts_of_map_elements_and_loop_rounds_are_reachable(
     # a node id still resolves to its assembled output
     node = client.get(f"/api/runs/{run_id}/steps/write/artifacts")
     assert node.status_code == 200
+
+
+def test_graph_nodes_carry_effective_models_and_checkpoints(
+    client: TestClient, tmp_path: Path
+) -> None:
+    # The UI badges the model that will actually run a node, so the graph must carry
+    # the EFFECTIVE model (resolved like the snapshot does, §7), not just what the
+    # YAML happens to spell out.
+    path = tmp_path / "projects" / "demo-project" / "pipelines" / "demo.yaml"
+    data = yaml.safe_load(path.read_text("utf-8"))
+    data["checkpoints"] = ["scan"]
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    graph = client.get("/api/projects/demo-project/pipelines/demo/graph").json()
+    nodes = {n["id"]: n for n in graph["nodes"]}
+
+    assert nodes["write"]["models"] == ["kimi/kimi-k3"]  # from project defaults
+    assert nodes["scan"]["models"] == []  # a builtin runs no model
+    assert nodes["scan"]["checkpoint"] is True
+    assert nodes["write"]["checkpoint"] is False

@@ -101,6 +101,8 @@ export interface GraphNode {
   agents: string[]
   needs: string[]
   fan_out: 'map' | 'map_over' | null
+  models: string[]
+  checkpoint: boolean
 }
 
 export interface PipelineGraph {

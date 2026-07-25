@@ -28,6 +28,7 @@ export function Templates() {
       <ul className="cards">
         {templates.map((t) => (
           <li key={t.name} className="card">
+            <div className="template-body">
             <h2>
               {t.title}{' '}
               {t.source === 'user' ? <span className="tag">yours</span> : null}
@@ -46,13 +47,14 @@ export function Templates() {
                 </li>
               ))}
             </ol>
-            {t.checkpoints.length ? (
-              <p className="meta">stops for review after: {t.checkpoints.join(', ')}</p>
+            {(t.checkpoints ?? []).length ? (
+              <p className="meta">stops for review after: {(t.checkpoints ?? []).join(', ')}</p>
             ) : null}
             <p className="meta">agents: {t.agents.join(', ')}</p>
             {t.needs.length ? (
               <p className="meta">capabilities: {t.needs.join(', ')}</p>
             ) : null}
+            </div>
           </li>
         ))}
       </ul>

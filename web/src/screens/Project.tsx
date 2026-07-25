@@ -177,9 +177,9 @@ export function Project({ project }: { project: string }) {
       <h2>Pipeline</h2>
       {graph ? (
         <>
-          {graph.checkpoints.length ? (
+          {(graph.checkpoints ?? []).length ? (
             <p className="meta">
-              stops for review after: {graph.checkpoints.join(', ')}
+              stops for review after: {(graph.checkpoints ?? []).join(', ')}
             </p>
           ) : null}
           <Graph graph={graph} onSelect={setSelected} selected={selected} />
@@ -199,7 +199,7 @@ export function Project({ project }: { project: string }) {
               <a href={href({ screen: 'run', project, runId: r.run_id })}>
                 <code>{r.run_id}</code>
               </a>
-              <span className={`status is-${r.status}`}>
+              <span className={`pill is-${r.status}`}>
                 {r.awaiting_checkpoint
                   ? `parked at ${r.awaiting_checkpoint}`
                   : r.status}

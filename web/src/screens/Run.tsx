@@ -112,13 +112,15 @@ export function Run({ project, runId }: { project: string; runId: string }) {
     <section>
       <header className="screen-head">
         <div>
-          <a href={href({ screen: 'project', project })}>← {project}</a>
+          <a className="back" href={href({ screen: 'project', project })}>
+            ← {project}
+          </a>
           <h1>
             <code>{runId}</code>
           </h1>
         </div>
         <div className="row">
-          <span className={`status is-${state?.status ?? 'pending'}`}>
+          <span className={`pill is-${state?.status ?? 'pending'}`}>
             {state?.status ?? '…'}
           </span>
           {state && !done ? (
@@ -215,7 +217,7 @@ export function Run({ project, runId }: { project: string; runId: string }) {
                 className={selected && step.node !== selected ? 'dimmed' : ''}
               >
                 <code>{id}</code>
-                <span className={`status is-${step.status}`}>{step.status}</span>
+                <span className={`pill is-${step.status}`}>{step.status}</span>
                 {step.outcome && step.outcome !== 'ok' ? (
                   <span className="warn">{step.outcome}</span>
                 ) : null}
@@ -241,7 +243,7 @@ export function Run({ project, runId }: { project: string; runId: string }) {
               .reverse()
               .map((e) => (
                 <li key={e.seq}>
-                  <span className="muted">{e.ts.slice(11, 19)}</span>{' '}
+                  <time>{e.ts.slice(11, 19)}</time>
                   <span className="tag">{e.type}</span>{' '}
                   {e.step_id ? <code>{e.step_id}</code> : null}{' '}
                   <span className="muted">{summarize(e)}</span>
