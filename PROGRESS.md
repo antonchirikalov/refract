@@ -51,6 +51,36 @@ step with an empty `output/` is a provider symptom, not an engine bug), `kimi`
 returns `403` with a billing message (that one surfaces correctly as
 `failed_agent`). Probe the provider directly before suspecting the engine.
 
+## Live full-chain validation (2026-07-26, kimi/k3)
+
+`examples/full-demo` (the merged `requirements_to_design` template, two synthetic
+sources) on real opencode + `kimi/k3`, both design candidates on kimi models because
+openai's quota is out. Result: sources → extracts → requirements → **checkpoint** →
+two designs → selection all `done`; `sd_refine` (the final design-refinement loop)
+failed on the provider's billing limit mid-run (`403`, and the same limiter answers
+`401` sometimes — a retry got design and choose through). ~15 min of step time for
+8 LLM steps.
+
+What the artifacts show, checked against the sources:
+
+- every number is right (300 lines/day, 2.5× peak, 40 devices, ~25 TC21, 4 h offline,
+  2 s scan-to-feedback, <1 % error, November pilot, three docks) and 300×2.5=750 is
+  used correctly for sizing;
+- the RFP-vs-transcript capacity conflict is **flagged as an open question**, not
+  silently resolved — which is what the critic-sees-extracts fix was for;
+- one real defect traced end to end: the transcript's freezer-aisle Wi-Fi dead spot is
+  in the extract, is dropped by the requirements writer, is caught by the critic as
+  non-blocking, and the design then inherits the omission (0 mentions). The critic's
+  approval was right on the merits but the rationale for the offline requirement is
+  gone from both documents;
+- the selector's rationale is factual: it accused the losing candidate of declaring
+  `illustration_count: 4` against five figures — verified true;
+- the design's residual risk is unverifiable specifics stated as decisions (Spring Boot
+  4.1, "Android 10 through 13" on the TC21, Zebra's roadmap for DataWedge vs EMDK,
+  SOTI MobiControl as "the established Zebra-ecosystem platform") and one genuine gap:
+  the monthly report carries named supervisors and is *notified* over the corporate
+  SMTP gateway, whose residency is never analysed against C-3.
+
 ## Phase status
 
 | Phase | Scope (SPEC §17) | Status |
