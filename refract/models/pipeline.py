@@ -214,4 +214,8 @@ class Pipeline(BaseModel):
     # the UI collects as text instead of asking for a folder. Execution is identical
     # (both are just files under input/); this only tells a client what to ask for.
     input_mode: Literal["documents", "brief"] = "documents"
+    # Node ids AFTER which the run parks for a human to verify the output (SPEC §21).
+    # Pipeline-level rather than a node param: checkpoints apply to every node kind,
+    # whose params models differ, and one list is what a client renders.
+    checkpoints: list[str] = Field(default_factory=list)
     nodes: list[Node]

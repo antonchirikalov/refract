@@ -360,6 +360,16 @@ class _Validator:
         }
         return not any(e.code in blocking for e in self.errors)
 
+    def _phase_checkpoints(self) -> None:
+        """Checkpoints must name nodes of this pipeline (SPEC §21.1)."""
+        for node_id in self.pipeline.checkpoints:
+            if node_id not in self.nodes:
+                self.err(
+                    Code.E_UNKNOWN_NODE_REF,
+                    None,
+                    f"checkpoint refers to unknown node {node_id!r}",
+                )
+
     # -- Phase D: shape / §16 constraints --
 
     def _phase_shape(self) -> None:
@@ -831,6 +841,7 @@ class _Validator:
         self._phase_ids()
         self._phase_existence()
         self._phase_refs()
+        self._phase_checkpoints()
         if self._refs_resolved():
             self._phase_shape()
             self._phase_edges()

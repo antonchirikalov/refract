@@ -554,6 +554,7 @@ async def run_pipeline(
     project_input_dir: Path | str | None = None,
     reuse_run_dir: Path | str | None = None,
     confirm_capabilities: set[str] | None = None,
+    stop_after: list[str] | None = None,
     clock: Callable[[], str] = utcnow_iso,
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> RunStatus:
@@ -563,6 +564,11 @@ async def run_pipeline(
     set ``R = force_nodes ∪ descendants`` with unchanged inputs are reused
     wholesale from that prior run; builtins always execute; map nodes diff their
     elements by ``(slug, source_hash)`` (SPEC §10.5).
+
+    ``stop_after`` adds run-scoped checkpoints to the pipeline's own
+    ``checkpoints``: the run parks at ``waiting_human`` once such a node is done,
+    so a human can verify (and even edit) its output before the rest proceeds
+    (SPEC §21).
     """
     run_dir = Path(run_dir)
     limits = provider_limits or {}
@@ -595,6 +601,10 @@ async def run_pipeline(
             semaphores[provider] = asyncio.Semaphore(max(1, limit))
         return semaphores[provider]
 
+    if ledger.state.awaiting_checkpoint is not None:
+        # a resume past a cleared checkpoint starts fresh (SPEC §21.2)
+        ledger.state.awaiting_checkpoint = None
+        ledger.save()
     ledger.set_run_status(RunStatus.running)
     events.emit(
         {"type": "run_state_changed", "payload": {"from": "created", "to": "running"}}
@@ -1179,7 +1189,54 @@ async def run_pipeline(
 
     _READY = {NodeStatus.done, NodeStatus.reused}
 
+    checkpoint_nodes = set(pipeline.checkpoints) | set(stop_after or [])
+    parked: str | None = None
+
+    def checkpoint_decision(node_id: str) -> bool | None:
+        """A human's decision on this checkpoint: True/False, None if unanswered."""
+        decision = run_dir / "steps" / node_id / "checkpoint" / "decision.json"
+        if not decision.exists():
+            return None
+        try:
+            return bool(json.loads(decision.read_text("utf-8")).get("approved", False))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def park_at(node_id: str) -> None:
+        """Record the checkpoint and stop scheduling new nodes (SPEC §21.2)."""
+        nonlocal parked
+        parked = node_id
+        outputs = _node_output_base(run_dir, nodes[node_id])
+        listing = (
+            sorted(str(p.relative_to(run_dir)) for p in outputs.iterdir())
+            if outputs.is_dir()
+            else []
+        )
+        checkpoint_dir = run_dir / "steps" / node_id / "checkpoint"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / "request.json").write_text(
+            json.dumps({"node": node_id, "outputs": listing}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        ledger.state.awaiting_checkpoint = node_id
+        ledger.save()
+        emit_event(
+            {
+                "type": "question",
+                "step_id": node_id,
+                "payload": {
+                    "question": (
+                        f"Checkpoint at {node_id}: review the output, then continue "
+                        f"(refract answer <run> {node_id} continue)"
+                    ),
+                    "outputs": listing,
+                },
+            }
+        )
+
     def ready() -> list[str]:
+        if parked is not None:
+            return []  # a checkpoint holds the run; in-flight nodes still finish
         out = []
         for nid in pending:
             if all(resolved.get(d) in _READY for d in deps[nid]):
@@ -1202,9 +1259,32 @@ async def run_pipeline(
                     set_node(nid, NodeStatus.skipped, error="upstream failed")
                     changed = True
 
+    rejected: str | None = None
+
+    def check_checkpoints() -> None:
+        """Park (or reject) on any finished checkpoint node not yet answered.
+
+        Evaluated every scheduling turn, not only when a task completes: on a resume
+        the checkpoint node is already ``done`` in the ledger, and an unanswered
+        checkpoint must still hold the run.
+        """
+        nonlocal rejected
+        for nid in sorted(checkpoint_nodes):
+            if resolved.get(nid) not in _READY:
+                continue
+            decision = checkpoint_decision(nid)
+            if decision is False:
+                rejected = nid
+                return
+            if decision is None and parked is None:
+                park_at(nid)
+
     try:
         while pending or tasks:
             skip_unreachable()
+            check_checkpoints()
+            if rejected is not None:
+                break
             for nid in ready():
                 pending.discard(nid)
                 tasks[asyncio.ensure_future(run_node(nid))] = nid
@@ -1214,6 +1294,7 @@ async def run_pipeline(
             for task in done:
                 nid = tasks.pop(task)
                 resolved[nid] = task.result()
+            check_checkpoints()
     except BaseException:
         # never leak in-flight tasks; leave the run in a terminal failed state
         for task in tasks:
@@ -1232,12 +1313,21 @@ async def run_pipeline(
     # Terminal status (§9): failed wins; else if any node is parked for a human the
     # run is waiting_human (paused, resumable via an answer — no finished_at); else
     # completed.
-    if any(s is NodeStatus.failed for s in resolved.values()):
+    if rejected is not None:
+        # a rejected checkpoint ends the run: the human said this output is not fit
+        # to build on (SPEC §21.2)
+        status = RunStatus.cancelled
+    elif any(s is NodeStatus.failed for s in resolved.values()):
         status = RunStatus.failed
+    elif parked is not None:
+        status = RunStatus.waiting_human
     elif any(s is NodeStatus.waiting_human for s in resolved.values()):
         status = RunStatus.waiting_human
     else:
         status = RunStatus.completed
+    if status is RunStatus.cancelled and rejected is not None:
+        ledger.state.awaiting_checkpoint = None
+        ledger.save()
     ledger.set_run_status(
         status, finished_at=None if status is RunStatus.waiting_human else clock()
     )

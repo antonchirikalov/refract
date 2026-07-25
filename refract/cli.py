@@ -438,6 +438,7 @@ def run_impl(
     runtime_factory: RuntimeFactory = _default_runtime_factory,
     run_id: str | None = None,
     force_nodes: list[str] | None = None,
+    stop_after: list[str] | None = None,
     reuse_run_id: str | None = None,
     clock: Callable[[], str] = utcnow_iso,
 ) -> tuple[RunStatus, Path]:
@@ -475,6 +476,16 @@ def run_impl(
     for nid in force_nodes or []:
         if nid not in {n.id for n in pipeline_obj.nodes}:
             raise UsageError(f"--from: no node {nid!r} in pipeline")
+    if stop_after:
+        known = {n.id for n in pipeline_obj.nodes}
+        for nid in stop_after:
+            if nid not in known:
+                raise UsageError(f"--stop-after: no node {nid!r} in pipeline")
+        # recorded in the snapshot (SPEC §21.1) so a resume keeps the same
+        # checkpoints as the original run
+        pipeline_obj.checkpoints = sorted(
+            set(pipeline_obj.checkpoints) | set(stop_after)
+        )
 
     active = _active_run(proj.runs_dir)
     if active is not None:
@@ -528,6 +539,7 @@ def run_impl(
                 project_input_dir=proj.input_dir,
                 reuse_run_dir=reuse_run_dir,
                 confirm_capabilities=_confirm_caps(proj.config, exec_agents),
+                stop_after=stop_after,
                 clock=clock,
             )
         )
@@ -583,7 +595,22 @@ def rerun_impl(
 
 # Affirmative answers that approve a capability confirmation; anything else
 # (incl. "no"/"reject") rejects it and fails the node.
-_AFFIRMATIVE = frozenset({"approve", "approved", "yes", "y", "ok", "okay", "да", "ок"})
+_AFFIRMATIVE = frozenset(
+    {
+        "approve",
+        "approved",
+        "yes",
+        "y",
+        "ok",
+        "okay",
+        "continue",
+        "go",
+        "да",
+        "ок",
+        "дальше",
+        "продолжай",
+    }
+)
 
 
 def write_answer(run_dir: Path | str, step_id: str, answer: str) -> None:
@@ -593,6 +620,16 @@ def write_answer(run_dir: Path | str, step_id: str, answer: str) -> None:
     """
     run_dir = Path(run_dir)
     node_id, _, leaf = step_id.partition(":")
+    checkpoint = run_dir / "steps" / node_id / "checkpoint" / "request.json"
+    if checkpoint.exists():
+        # a checkpoint parks the RUN after the node finished (SPEC §21), so there is
+        # no waiting step to look up — the decision is the whole answer
+        approved = answer.strip().casefold() in _AFFIRMATIVE
+        (checkpoint.parent / "decision.json").write_text(
+            json.dumps({"approved": approved, "answer": answer}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return
     step = ledger_step(run_dir, step_id)
     if step is None or step.status is not StepStatus.waiting_human:
         raise UsageError(f"step {step_id!r} is not waiting for a human answer")
@@ -798,8 +835,20 @@ def render_status(run_dir: Path | str) -> str:
         f"run:      {state.run_id}",
         f"pipeline: {state.pipeline}",
         f"status:   {state.status.value}",
-        "nodes:",
     ]
+    if state.awaiting_checkpoint:
+        parked = state.awaiting_checkpoint
+        lines.append(f"awaiting checkpoint: {parked}")
+        request = run_dir / "steps" / parked / "checkpoint" / "request.json"
+        if request.exists():
+            try:
+                outputs = json.loads(request.read_text("utf-8")).get("outputs", [])
+            except json.JSONDecodeError:
+                outputs = []
+            for path in outputs:
+                lines.append(f"  output: {path}")
+        lines.append(f"  continue with: refract answer {run_dir} {parked} continue")
+    lines.append("nodes:")
     for nid, node in state.nodes.items():
         err = f"  ({node.error})" if node.error else ""
         lines.append(f"  {nid:<20} {node.status.value}{err}")
@@ -1032,6 +1081,9 @@ def run(
     pipeline: str | None = typer.Option(None, "--pipeline"),
     model_for: list[str] = typer.Option([], "--model-for", help="KEY=MODEL"),
     workers_for: list[str] = typer.Option([], "--workers-for", help="NODE=N"),
+    stop_after: list[str] = typer.Option(
+        [], "--stop-after", help="park the run after NODE for review (§21)"
+    ),
 ) -> None:
     """Run a pipeline end-to-end."""
 
@@ -1040,13 +1092,17 @@ def run(
         workers = {
             k: int(v) for k, v in _parse_kv(workers_for, flag="--workers-for").items()
         }
-        status, _ = run_impl(
+        status, run_dir = run_impl(
             project_dir,
             pipeline=pipeline,
             app=load_app_config(),
             model_overrides=overrides,
             workers_for=workers,
+            stop_after=list(stop_after),
         )
+        if status is RunStatus.waiting_human:
+            typer.echo(render_status(run_dir))
+            return EXIT_OK
         return EXIT_OK if status is RunStatus.completed else EXIT_RUN_FAILED
 
     _run_cli(body)

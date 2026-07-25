@@ -46,6 +46,9 @@ export function Templates() {
                 </li>
               ))}
             </ol>
+            {t.checkpoints.length ? (
+              <p className="meta">stops for review after: {t.checkpoints.join(', ')}</p>
+            ) : null}
             <p className="meta">agents: {t.agents.join(', ')}</p>
             {t.needs.length ? (
               <p className="meta">capabilities: {t.needs.join(', ')}</p>

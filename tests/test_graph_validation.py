@@ -1025,3 +1025,36 @@ nodes:
             _pipeline(self._yaml("finder@1", with_map=True)), ctx
         )
         assert _codes(errors) - {Code.W_SECURITY} == set()
+
+
+class TestCheckpoints:
+    def test_unknown_checkpoint_node_is_reported(self, tmp_path: Path) -> None:
+        # SPEC §21.1: a checkpoint must name a node of this pipeline.
+        pipeline = _pipeline(
+            """
+version: "0.1"
+name: p
+checkpoints: [nope]
+nodes:
+  - id: scan
+    type: builtin/scanner
+"""
+        )
+        ctx = make_ctx(tmp_path, agents={})
+        _order, errors = validate_pipeline(pipeline, ctx)
+        assert Code.E_UNKNOWN_NODE_REF in _codes(errors)
+
+    def test_known_checkpoint_node_is_accepted(self, tmp_path: Path) -> None:
+        pipeline = _pipeline(
+            """
+version: "0.1"
+name: p
+checkpoints: [scan]
+nodes:
+  - id: scan
+    type: builtin/scanner
+"""
+        )
+        ctx = make_ctx(tmp_path, agents={})
+        _order, errors = validate_pipeline(pipeline, ctx)
+        assert Code.E_UNKNOWN_NODE_REF not in _codes(errors)

@@ -142,6 +142,7 @@ class StartRunRequest(BaseModel):
     overrides: dict[str, str] | None = None
     reuse_from: str | None = None
     force: list[str] | None = None
+    stop_after: list[str] | None = None  # extra checkpoints for this run (SPEC §21)
 
 
 class StartRunResponse(BaseModel):
@@ -188,6 +189,7 @@ class PipelineGraph(BaseModel):
 
     name: str
     input_mode: str
+    checkpoints: list[str]  # nodes after which the run parks for review (§21)
     order: list[str]
     nodes: list[GraphNode]
     edges: list[GraphEdge]
@@ -682,6 +684,7 @@ def create_app(
         return PipelineGraph(
             name=name,
             input_mode=graph.pipeline.input_mode,
+            checkpoints=list(graph.pipeline.checkpoints),
             order=graph.order,
             nodes=nodes,
             edges=edges,
@@ -735,6 +738,7 @@ def create_app(
                     runtime_factory=st.runtime_factory,
                     run_id=run_id,
                     force_nodes=req.force,
+                    stop_after=req.stop_after,
                     reuse_run_id=req.reuse_from,
                     clock=st.clock,
                 )

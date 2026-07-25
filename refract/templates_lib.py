@@ -124,6 +124,7 @@ def template_metadata(
         "title": pipeline.name or ref.name,
         "description": header_comment(text),
         "input_mode": pipeline.input_mode,
+        "checkpoints": list(pipeline.checkpoints),
         "nodes": [{"id": n.id, "type": n.type} for n in pipeline.nodes],
         "agents": agent_refs,
         "needs": needs,

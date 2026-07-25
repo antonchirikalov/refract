@@ -35,6 +35,7 @@ export interface TemplateInfo {
   title: string
   description: string
   input_mode: 'documents' | 'brief'
+  checkpoints: string[]
   nodes: { id: string; type: string }[]
   agents: string[]
   needs: string[]
@@ -88,6 +89,7 @@ export interface RunState {
   finished_at: string | null
   reuse_from: string | null
   force_nodes: string[]
+  awaiting_checkpoint: string | null
   nodes: Record<string, NodeState>
   steps: Record<string, StepState>
 }
@@ -103,6 +105,7 @@ export interface GraphNode {
 export interface PipelineGraph {
   name: string
   input_mode: 'documents' | 'brief'
+  checkpoints: string[]
   order: string[]
   nodes: GraphNode[]
   edges: { source: string; target: string; port: string }[]

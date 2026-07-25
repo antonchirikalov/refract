@@ -46,7 +46,8 @@ def test_library_agents_load_without_errors() -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["extract", "discovery", "solution_design", "research"]
+    "name",
+    ["extract", "discovery", "solution_design", "research", "requirements_to_design"],
 )
 def test_template_validates(name: str) -> None:
     graph = load_pipeline(TEMPLATES / f"{name}.yaml", _ctx())
@@ -88,6 +89,15 @@ _SCENARIOS: dict[str, dict[str, dict[str, str]]] = {
         "refine.body:*": {"requirements.md": _REQ},
         "refine.critic:*": {"verdict.json": _APPROVED},
     },
+    "requirements_to_design": {
+        "extract:*": {"extract.json": _EXTRACT},
+        "refine.body:*": {"requirements.md": _REQ},
+        "refine.critic:*": {"verdict.json": _APPROVED},
+        "design:*": {"design_doc.md": _DESIGN},
+        "choose.selector": {"choice.json": json.dumps({"winner": "openai_gpt-5-6"})},
+        "sd_refine.body:*": {"design_doc.md": _DESIGN},
+        "sd_refine.critic:*": {"verdict.json": _APPROVED},
+    },
     "solution_design": {
         "extract:*": {"extract.json": _EXTRACT},
         "refine.body:*": {"requirements.md": _REQ},
@@ -105,7 +115,8 @@ async def _no_sleep(_seconds: float) -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["extract", "discovery", "solution_design", "research"]
+    "name",
+    ["extract", "discovery", "solution_design", "research", "requirements_to_design"],
 )
 def test_template_runs_end_to_end(name: str, tmp_path: Path) -> None:
     agents, _ = load_agents(LIBRARY)
@@ -157,6 +168,17 @@ def test_template_runs_end_to_end(name: str, tmp_path: Path) -> None:
             sleeper=_no_sleep,
         )
     )
+    if pipeline.checkpoints:
+        # a checkpointed template parks for review instead of running to the end
+        # (SPEC §21); continuing it is covered by tests/test_checkpoint.py
+        assert status is RunStatus.waiting_human
+        assert ledger.state.awaiting_checkpoint == pipeline.checkpoints[0]
+        for node_id in pipeline.checkpoints:
+            assert ledger.get_node(node_id).status in (
+                NodeStatus.done,
+                NodeStatus.reused,
+            )
+        return
     assert status is RunStatus.completed, {
         k: (v.status.value, v.error) for k, v in ledger.state.nodes.items()
     }

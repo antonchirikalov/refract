@@ -61,7 +61,19 @@ export function Run({ project, runId }: { project: string; runId: string }) {
   const waiting = Object.entries(state?.steps ?? {}).find(
     ([, s]) => s.status === 'waiting_human',
   )
+  const checkpoint = state?.awaiting_checkpoint ?? null
   const done = state ? TERMINAL.has(state.status) : false
+
+  // A checkpoint parks the run AFTER a node finished (SPEC §21): review its output —
+  // editing it on disk is allowed — then continue, and the rest of the graph runs.
+  async function decideCheckpoint(node: string, decision: string) {
+    try {
+      await api.answer(runId, node, decision)
+      await api.resumeRun(runId)
+    } catch (e) {
+      setError(String(e))
+    }
+  }
 
   return (
     <section>
@@ -99,7 +111,34 @@ export function Run({ project, runId }: { project: string; runId: string }) {
 
       {error ? <pre className="error">{error}</pre> : null}
 
-      {waiting ? (
+      {checkpoint ? (
+        <div className="panel warn">
+          <h3>Checkpoint — review {checkpoint} before continuing</h3>
+          <p className="muted">
+            The run stopped here on purpose. Read the output below; you may edit the
+            files in place, and the rest of the pipeline will read your version.
+          </p>
+          <Artifacts runId={runId} stepId={checkpoint} />
+          <div className="row">
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => void decideCheckpoint(checkpoint, 'continue')}
+            >
+              Continue
+            </button>
+            <button
+              type="button"
+              className="button"
+              onClick={() => void decideCheckpoint(checkpoint, 'reject')}
+            >
+              Stop here
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {waiting && !checkpoint ? (
         <div className="panel warn">
           <h3>Waiting for you — {waiting[0]}</h3>
           <textarea
@@ -163,7 +202,8 @@ export function Run({ project, runId }: { project: string; runId: string }) {
           <h2>Events</h2>
           <ul className="feed">
             {events
-              .filter((e) => !selected || e.step_id?.startsWith(selected) !== false)
+              // when a node is selected: its own events plus run-level ones
+              .filter((e) => !selected || !e.step_id || e.step_id.startsWith(selected))
               .slice(-120)
               .reverse()
               .map((e) => (

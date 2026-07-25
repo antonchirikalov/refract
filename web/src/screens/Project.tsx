@@ -160,6 +160,11 @@ export function Project({ project }: { project: string }) {
       <h2>Pipeline</h2>
       {graph ? (
         <>
+          {graph.checkpoints.length ? (
+            <p className="meta">
+              stops for review after: {graph.checkpoints.join(', ')}
+            </p>
+          ) : null}
           <Graph graph={graph} onSelect={setSelected} selected={selected} />
           {selected ? <NodeDetail graph={graph} nodeId={selected} /> : null}
         </>

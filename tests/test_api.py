@@ -81,6 +81,21 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(api)
 
 
+def _wait_status(
+    client: TestClient,
+    run_id: str,
+    wanted: set[str],
+    timeout: float = 10.0,
+) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        resp = client.get(f"/api/runs/{run_id}")
+        if resp.status_code == 200 and resp.json()["status"] in wanted:
+            return resp.json()
+        time.sleep(0.05)
+    raise AssertionError(f"run {run_id} never reached {wanted} within {timeout}s")
+
+
 def _wait_completed(client: TestClient, run_id: str, timeout: float = 10.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -575,3 +590,51 @@ def test_brief_is_stored_as_the_projects_source_document(client: TestClient) -> 
 
     empty = client.put("/api/projects/demo-project/input/brief", json={"text": "   "})
     assert empty.status_code == 400
+
+
+# --- checkpoints over the API (SPEC §21, the UI's exact calls) ------------------
+
+
+def test_run_parks_at_a_checkpoint_and_continues_on_answer(
+    client: TestClient,
+) -> None:
+    started = client.post(
+        "/api/projects/demo-project/runs",
+        json={"pipeline": "demo", "stop_after": ["scan"]},
+    )
+    assert started.status_code == 202
+    run_id = started.json()["run_id"]
+
+    parked = _wait_status(client, run_id, {"waiting_human"})
+    assert parked["status"] == "waiting_human"
+    assert parked["awaiting_checkpoint"] == "scan"
+    assert parked["nodes"]["write"]["status"] == "pending"
+
+    # what the UI shows in the banner: the reviewable outputs of that node
+    files = client.get(f"/api/runs/{run_id}/steps/scan/artifacts").json()
+    assert files
+
+    assert (
+        client.post(
+            f"/api/runs/{run_id}/answers",
+            json={"step_id": "scan", "answer": "continue"},
+        ).status_code
+        == 200
+    )
+    finished = _wait_completed(client, run_id)
+    assert finished["status"] == "completed"
+    assert finished["awaiting_checkpoint"] is None
+    assert finished["nodes"]["write"]["status"] == "done"
+
+
+def test_pipeline_graph_reports_declared_checkpoints(
+    client: TestClient, tmp_path: Path
+) -> None:
+    path = tmp_path / "projects" / "demo-project" / "pipelines" / "demo.yaml"
+    data = yaml.safe_load(path.read_text("utf-8"))
+    data["checkpoints"] = ["scan"]
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    graph = client.get("/api/projects/demo-project/pipelines/demo/graph").json()
+
+    assert graph["checkpoints"] == ["scan"]

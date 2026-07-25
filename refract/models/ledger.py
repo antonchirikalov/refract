@@ -88,6 +88,8 @@ class RunState(BaseModel):
     finished_at: str | None = None
     reuse_from: str | None = None
     force_nodes: list[str] = Field(default_factory=list)
+    # Node whose checkpoint parked this run (SPEC §21); cleared when it continues.
+    awaiting_checkpoint: str | None = None
     nodes: dict[str, NodeState] = Field(default_factory=dict)
     steps: dict[str, StepState] = Field(default_factory=dict)
 
