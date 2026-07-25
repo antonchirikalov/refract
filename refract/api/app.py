@@ -52,8 +52,15 @@ from refract.cli import (
 )
 from refract.catalog import build_catalog
 from refract.events import EVENTS_FILENAME, utcnow_iso
-from refract.graph import load_agents, load_pipeline
+from refract.graph import LoadedGraph, load_agents, load_pipeline
 from refract.models.ledger import RunState
+from refract.models.pipeline import (
+    AgentNode,
+    DiscoverNode,
+    LoopNode,
+    Node,
+    SelectNode,
+)
 from refract.registry import ArtifactRegistry
 from refract.templates_lib import (
     TEMPLATES_SUBDIR,
@@ -162,11 +169,38 @@ class PipelineWriteResponse(BaseModel):
     warnings: list[ValidationError] = Field(default_factory=list)
 
 
+class GraphNode(BaseModel):
+    id: str
+    type: str
+    agents: list[str] = Field(default_factory=list)
+    needs: list[str] = Field(default_factory=list)
+    fan_out: str | None = None  # "map" | "map_over" | None
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+    port: str
+
+
+class PipelineGraph(BaseModel):
+    """A pipeline's shape for the UI (SPEC-UI §4) — derived, never authored."""
+
+    name: str
+    input_mode: str
+    order: list[str]
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+
+
 class ProviderInfo(BaseModel):
     name: str
     api_key_env: str
     available: bool
     max_concurrent: int
+    # model-ids offered under this provider (SPEC §7); the UI needs them to build a
+    # "provider/model-id" string, which is what a project's defaults.model is
+    models: list[str] = Field(default_factory=list)
 
 
 class FsEntry(BaseModel):
@@ -201,12 +235,14 @@ def create_app(
     app_config: AppConfig,
     runtime_factory: RuntimeFactory | None = None,
     clock: Callable[[], str] = utcnow_iso,
+    static_dir: Path | None = None,
 ) -> FastAPI:
     """Build the refract REST/WS API app (SPEC §15).
 
     ``projects_root`` holds one directory per project (each with a
     ``project.yaml``). ``runtime_factory`` defaults to the real opencode
-    runtime; tests inject a MockRuntime factory.
+    runtime; tests inject a MockRuntime factory. ``static_dir`` (the built SPA)
+    is served at the root when given, so one process serves API and UI.
     """
     st = _State(
         projects_root=Path(projects_root),
@@ -275,6 +311,22 @@ def create_app(
             else:
                 errors.append(item)
         return errors, warnings
+
+    def _load_graph(project_dir: Path, path: Path) -> "LoadedGraph":
+        from refract.cli import _build_context
+        from refract.models.config import ProjectConfig
+
+        raw = yaml.safe_load((project_dir / "project.yaml").read_text("utf-8")) or {}
+        config = ProjectConfig.model_validate(raw)
+        agents, _ = load_agents(st.app_config.library_path)
+        ctx = _build_context(
+            st.app_config,
+            registry=ArtifactRegistry.load(st.app_config.library_path),
+            agents=agents,
+            default_model=config.defaults.model,
+            model_overrides={},
+        )
+        return load_pipeline(path, ctx)
 
     def _collect_errors(
         project_dir: Path, pipeline: str, overrides: dict[str, str]
@@ -582,6 +634,59 @@ def create_app(
         """The authoring catalog: what a pipeline can be built from (SPEC §19.1)."""
         return build_catalog(st.app_config.library_path)
 
+    @api.get("/api/projects/{project_id}/pipelines/{name}/graph")
+    def get_pipeline_graph(project_id: str, name: str) -> PipelineGraph:
+        """Nodes + edges of a pipeline, for drawing it (SPEC-UI §4).
+
+        Derived by the engine's own loader, so a client never parses YAML and can
+        never disagree with the validator about the graph's shape.
+        """
+        pdir = _project_dir(project_id)
+        path = pdir / "pipelines" / f"{name}.yaml"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=f"no pipeline {name!r}")
+        graph = _load_graph(pdir, path)
+        if graph.pipeline is None:
+            raise HTTPException(
+                status_code=422,
+                detail=[
+                    {
+                        "code": getattr(e.code, "value", str(e.code)),
+                        "message": e.message,
+                    }
+                    for e in graph.errors
+                ],
+            )
+        agents, _ = load_agents(st.app_config.library_path)
+        nodes: list[GraphNode] = []
+        edges: list[GraphEdge] = []
+        for node in graph.pipeline.nodes:
+            refs = _node_agent_refs(node)
+            needs: list[str] = []
+            for ref in refs:
+                spec = agents.get(ref)
+                for cap in spec.needs if spec else []:
+                    if cap not in needs:
+                        needs.append(cap)
+            nodes.append(
+                GraphNode(
+                    id=node.id,
+                    type=node.type,
+                    agents=refs,
+                    needs=needs,
+                    fan_out=_node_fan_out(node),
+                )
+            )
+            for source, port in _node_sources(node):
+                edges.append(GraphEdge(source=source, target=node.id, port=port))
+        return PipelineGraph(
+            name=name,
+            input_mode=graph.pipeline.input_mode,
+            order=graph.order,
+            nodes=nodes,
+            edges=edges,
+        )
+
     @api.post("/api/projects/{project_id}/pipelines/{name}/validate")
     def validate_pipeline(project_id: str, name: str) -> ValidateResponse:
         pdir = _project_dir(project_id)
@@ -761,6 +866,7 @@ def create_app(
                     api_key_env=p.api_key_env,
                     available=name in available,
                     max_concurrent=p.max_concurrent,
+                    models=list(p.models),
                 )
             )
         return out
@@ -804,6 +910,13 @@ def create_app(
             await ws.close()
         except WebSocketDisconnect:
             return
+
+    if static_dir is not None and static_dir.is_dir():
+        # mounted last so every /api route wins; html=True serves index.html for
+        # unknown paths, which the hash-routed SPA needs
+        from fastapi.staticfiles import StaticFiles
+
+        api.mount("/", StaticFiles(directory=static_dir, html=True), name="ui")
 
     return api
 
@@ -878,3 +991,51 @@ def _unique_run_id(runs_dir: Path, registry: dict[str, RunRecord]) -> str:
         run_id = f"{base}_{n}"
         n += 1
     return run_id
+
+
+# --- module-level graph helpers ------------------------------------------------
+
+
+def _node_agent_refs(node: Node) -> list[str]:
+    """Agent refs a node binds, in the order the engine would run them."""
+    if isinstance(node, AgentNode | DiscoverNode):
+        return [node.agent]
+    if isinstance(node, LoopNode):
+        return [node.body.agent, node.critic.agent]
+    if isinstance(node, SelectNode):
+        return [node.selector.agent]
+    return []
+
+
+def _node_fan_out(node: Node) -> str | None:
+    if isinstance(node, AgentNode):
+        if node.map is not None:
+            return "map"
+        if node.map_over is not None:
+            return "map_over"
+    return None
+
+
+def _node_sources(node: Node) -> list[tuple[str, str]]:
+    """``(source_node, port)`` pairs feeding a node — its incoming edges."""
+    refs: list[str] = []
+    if isinstance(node, AgentNode):
+        refs = [*node.inputs.values()]
+        if node.map is not None:
+            refs.append(node.map)
+    elif isinstance(node, DiscoverNode):
+        refs = [*node.inputs.values()]
+    elif isinstance(node, LoopNode):
+        refs = [
+            r
+            for r in (*node.body.inputs.values(), *node.critic.inputs.values())
+            if not r.startswith("@")
+        ]
+    elif isinstance(node, SelectNode):
+        refs = [node.candidates]
+    out: list[tuple[str, str]] = []
+    for ref_s in refs:
+        source, _, port = ref_s.partition(".")
+        if source and port and (source, port) not in out:
+            out.append((source, port))
+    return out

@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 import yaml
@@ -44,6 +45,9 @@ from refract.scheduler import node_dependencies, run_pipeline
 from refract.snapshot import build_snapshot
 from refract.state import Ledger
 from refract.templates_lib import find_template, list_templates
+
+if TYPE_CHECKING:  # pragma: no cover - typing only (fastapi is an extra)
+    from fastapi import FastAPI
 
 # Exit codes (SPEC §14; test_cli asserts these).
 EXIT_OK = 0
@@ -864,6 +868,64 @@ def catalog_impl(app: AppConfig, *, as_json: bool = False) -> int:
     return EXIT_OK
 
 
+DEFAULT_WORKSPACE = "projects"
+
+
+def workspace_dir(override: str | None = None) -> Path:
+    """The workspace holding one directory per project (SPEC-UI §2).
+
+    ``--projects-root`` wins, then ``$REFRACT_WORKSPACE``, else
+    ``<refract_home>/projects``. Created on demand so a first run just works.
+    """
+    raw = override or os.environ.get("REFRACT_WORKSPACE")
+    path = Path(raw) if raw else refract_home() / DEFAULT_WORKSPACE
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def web_dist() -> Path | None:
+    """The built SPA directory, if this checkout has one (``web/dist``)."""
+    candidate = Path(__file__).resolve().parent.parent / "web" / "dist"
+    return candidate if (candidate / "index.html").exists() else None
+
+
+def build_api(app: AppConfig, *, projects_root: Path) -> "FastAPI":
+    """Build the FastAPI app (SPEC §15) — separated so tests skip uvicorn."""
+    from refract.api import create_app
+
+    return create_app(
+        projects_root=projects_root, app_config=app, static_dir=web_dist()
+    )
+
+
+def serve_impl(
+    app: AppConfig,
+    *,
+    projects_root: Path,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    runner: Callable[["FastAPI", str, int], None] | None = None,
+) -> int:
+    """Serve the REST/WS API (SPEC §15) over the workspace.
+
+    Binds to localhost by default: the API runs pipelines and browses the
+    filesystem, so it is a local tool, not something to expose (I8).
+    """
+    api = build_api(app, projects_root=projects_root)
+    ui = web_dist()
+    typer.echo(f"serving {projects_root} on http://{host}:{port}")
+    typer.echo(
+        f"  ui: {'bundled' if ui else 'not built (run `npm run build` in web/)'}"
+    )
+    if runner is None:  # pragma: no cover - real server loop
+        import uvicorn
+
+        uvicorn.run(api, host=host, port=port, log_level="info")
+    else:
+        runner(api, host, port)
+    return EXIT_OK
+
+
 def init_impl(
     project_dir: Path | str,
     *,
@@ -1090,6 +1152,25 @@ def init(
 def templates() -> None:
     """List available pipeline templates from the library (§14)."""
     _run_cli(lambda: templates_impl(load_app_config()))
+
+
+@app.command()
+def serve(
+    projects_root: Path | None = typer.Option(
+        None, "--projects-root", help="workspace dir (default <refract_home>/projects)"
+    ),
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8765, "--port"),
+) -> None:
+    """Serve the REST/WS API for the UI (§15)."""
+    _run_cli(
+        lambda: serve_impl(
+            load_app_config(),
+            projects_root=workspace_dir(str(projects_root) if projects_root else None),
+            host=host,
+            port=port,
+        )
+    )
 
 
 @app.command()

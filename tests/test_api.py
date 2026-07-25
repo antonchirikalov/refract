@@ -205,6 +205,7 @@ def test_put_pipeline_and_models(client: TestClient) -> None:
     assert kimi["available"] is True
     # never echo secret values, only the env var name
     assert kimi["api_key_env"] == "MOONSHOT_API_KEY"
+    assert "models" in kimi  # the UI builds "provider/model-id" from these
 
 
 # --- pipeline write: verify, then commit (SPEC §19.2/§19.3) -------------------
@@ -437,3 +438,140 @@ def test_project_runs_list_reports_ledger_status(client: TestClient) -> None:
     assert [r["run_id"] for r in runs] == [run_id]
     assert runs[0]["pipeline"] == "demo"
     assert runs[0]["status"] in {"completed", "failed"}
+
+
+# --- serve wiring (SPEC §15 / SPEC-UI §2) --------------------------------------
+
+
+def test_serve_builds_the_api_over_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `refract serve` must expose the same API the tests drive; uvicorn itself is
+    # injected so no socket is opened here.
+    from refract.cli import serve_impl, workspace_dir
+
+    monkeypatch.setenv("MOONSHOT_API_KEY", "sk-test")
+    monkeypatch.setenv("REFRACT_HOME", str(tmp_path / "home"))
+    workspace = workspace_dir()
+    shutil.copytree(
+        DEMO_PROJECT, workspace / "demo-project", ignore=shutil.ignore_patterns("runs")
+    )
+    seen: dict[str, object] = {}
+
+    def runner(api: object, host: str, port: int) -> None:
+        seen.update(host=host, port=port)
+        with TestClient(api) as client:  # type: ignore[arg-type]
+            seen["projects"] = client.get("/api/projects").json()
+            seen["catalog_ok"] = client.get("/api/catalog").status_code == 200
+
+    code = serve_impl(_app_config(), projects_root=workspace, port=1234, runner=runner)
+
+    assert code == 0
+    assert seen["host"] == "127.0.0.1"  # local tool, not exposed (I8)
+    assert seen["port"] == 1234
+    assert seen["projects"] == ["demo-project"]
+    assert seen["catalog_ok"] is True
+
+
+def test_workspace_defaults_under_refract_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from refract.cli import workspace_dir
+
+    monkeypatch.delenv("REFRACT_WORKSPACE", raising=False)
+    monkeypatch.setenv("REFRACT_HOME", str(tmp_path / "home"))
+
+    created = workspace_dir()
+
+    assert created == tmp_path / "home" / "projects"
+    assert created.is_dir()  # created on demand, first run just works
+
+
+def test_pipeline_graph_is_derived_by_the_engine(client: TestClient) -> None:
+    # SPEC-UI §4: the UI draws from this, so it never parses YAML itself.
+    resp = client.get("/api/projects/demo-project/pipelines/demo/graph")
+
+    assert resp.status_code == 200
+    graph = resp.json()
+    assert graph["input_mode"] == "documents"
+    nodes = {n["id"]: n for n in graph["nodes"]}
+    assert nodes["scan"]["type"] == "builtin/scanner"
+    assert nodes["write"]["agents"] == ["demo_writer@1"]
+    assert nodes["write"]["fan_out"] == "map"
+    assert {"source": "scan", "target": "write", "port": "sources"} in graph["edges"]
+    assert graph["order"] == ["scan", "write"]
+
+
+def test_pipeline_graph_404s_for_an_unknown_pipeline(client: TestClient) -> None:
+    assert (
+        client.get("/api/projects/demo-project/pipelines/nope/graph").status_code == 404
+    )
+
+
+# --- project input: documents copied in, or a brief (SPEC-UI §4/§6) ------------
+
+
+def test_documents_are_copied_into_the_project(
+    client: TestClient, tmp_path: Path
+) -> None:
+    source = tmp_path / "client-docs"
+    source.mkdir()
+    (source / "transcript.md").write_text("# Call\n", encoding="utf-8")
+    (source / ".DS_Store").write_text("junk", encoding="utf-8")
+    (source / "attachments").mkdir()
+    (source / "attachments" / "spec.md").write_text("# Spec\n", encoding="utf-8")
+
+    resp = client.post(
+        "/api/projects/demo-project/input/documents", json={"path": str(source)}
+    )
+
+    assert resp.status_code == 200
+    entries = resp.json()["entries"]
+    assert "transcript.md" in entries
+    assert "attachments" in entries  # a subfolder is one source (§13)
+    assert ".DS_Store" not in entries  # tooling artifacts never become sources
+    # copied, not referenced: the project keeps its own input dir
+    assert resp.json()["external"] is False
+
+
+def test_import_replace_clears_the_input_first(
+    client: TestClient, tmp_path: Path
+) -> None:
+    first = tmp_path / "a"
+    first.mkdir()
+    (first / "old.md").write_text("old", encoding="utf-8")
+    second = tmp_path / "b"
+    second.mkdir()
+    (second / "new.md").write_text("new", encoding="utf-8")
+
+    client.post("/api/projects/demo-project/input/documents", json={"path": str(first)})
+    resp = client.post(
+        "/api/projects/demo-project/input/documents",
+        json={"path": str(second), "replace": True},
+    )
+
+    entries = resp.json()["entries"]
+    assert "new.md" in entries
+    assert "old.md" not in entries
+
+
+def test_import_rejects_a_path_that_is_not_a_folder(client: TestClient) -> None:
+    resp = client.post(
+        "/api/projects/demo-project/input/documents", json={"path": "nope"}
+    )
+    assert resp.status_code == 400
+
+
+def test_brief_is_stored_as_the_projects_source_document(client: TestClient) -> None:
+    # SPEC §20.4: a research brief needs no special path — it is a document that
+    # builtin/brief reads.
+    resp = client.put(
+        "/api/projects/demo-project/input/brief",
+        json={"text": "How do warehouses handle offline receiving?"},
+    )
+
+    assert resp.status_code == 200
+    assert "brief.md" in resp.json()["entries"]
+
+    empty = client.put("/api/projects/demo-project/input/brief", json={"text": "   "})
+    assert empty.status_code == 400

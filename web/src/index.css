@@ -1,0 +1,418 @@
+/* refract UI — one stylesheet, no framework. Status colour is never the only signal:
+   every status also carries its own text label. */
+
+:root {
+  --bg: #fbfbfa;
+  --panel: #ffffff;
+  --ink: #1a1a19;
+  --muted: #6f6f6a;
+  --line: #e3e2de;
+  --accent: #2f6f5f;
+  --run: #8a6a1f;
+  --ok: #2f6f4f;
+  --fail: #a33a2a;
+  --wait: #7a4fa3;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141514;
+    --panel: #1c1e1d;
+    --ink: #ecebe6;
+    --muted: #9b9a94;
+    --line: #2e312f;
+    --accent: #6fbfa6;
+    --run: #d4ab55;
+    --ok: #6cb98f;
+    --fail: #e08272;
+    --wait: #b192d6;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+code,
+pre {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 0.9em;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+nav {
+  display: flex;
+  gap: 1.25rem;
+  align-items: baseline;
+  padding: 0.85rem 1.5rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.brand {
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  margin-right: auto;
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0;
+}
+
+h2 {
+  font-size: 1.05rem;
+  margin: 1.75rem 0 0.6rem;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+
+.screen-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.25rem 0 0;
+}
+
+.warn {
+  color: var(--run);
+}
+
+.error {
+  color: var(--fail);
+  white-space: pre-wrap;
+}
+
+.tag {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 0.45rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+button,
+.button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.4rem 0.7rem;
+}
+
+button,
+.button {
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.field {
+  display: block;
+  margin: 0.9rem 0;
+}
+
+.field > span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-bottom: 0.25rem;
+}
+
+.field input,
+.field select,
+.field textarea,
+textarea {
+  width: 100%;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 0.85rem 1rem;
+  margin: 0.5rem 0;
+}
+
+.panel.error {
+  border-color: var(--fail);
+}
+
+.panel.warn {
+  border-color: var(--run);
+}
+
+.cards {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 0.85rem 1rem;
+}
+
+.card h2 {
+  margin: 0 0 0.3rem;
+  font-size: 1.05rem;
+  color: var(--ink);
+  letter-spacing: 0;
+}
+
+.card p {
+  margin: 0.2rem 0;
+}
+
+.card.selectable button {
+  all: unset;
+  cursor: pointer;
+  display: block;
+  width: 100%;
+}
+
+.card.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.rows,
+.feed,
+.inline,
+.chain {
+  list-style: none;
+  padding: 0;
+  margin: 0.4rem 0;
+}
+
+.rows > li {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.rows > li.dimmed {
+  opacity: 0.4;
+}
+
+.inline {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.inline > li {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 0.4rem;
+  font-size: 0.85rem;
+}
+
+.chain {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin: 0.5rem 0;
+}
+
+.chain > li {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.8rem;
+  display: flex;
+  gap: 0.3rem;
+}
+
+.feed {
+  max-height: 60vh;
+  overflow: auto;
+  font-size: 0.85rem;
+}
+
+.feed > li {
+  padding: 0.15rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.split {
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: 1fr 1fr;
+}
+
+@media (max-width: 850px) {
+  .split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.artifacts {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.artifacts a {
+  text-decoration: underline;
+  color: var(--accent);
+  font-size: 0.85rem;
+}
+
+/* --- graph: dependency layers, top to bottom --- */
+
+.graph {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding: 0.5rem 0;
+}
+
+.graph-layer {
+  display: flex;
+  gap: 0.6rem;
+  align-items: stretch;
+}
+
+.node {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  align-items: flex-start;
+  min-width: 150px;
+  text-align: left;
+  border-left: 3px solid var(--line);
+}
+
+.node-id {
+  font-weight: 600;
+}
+
+.node-kind,
+.node-status {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.node.is-selected {
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.node.is-running {
+  border-left-color: var(--run);
+}
+
+.node.is-done,
+.node.is-reused {
+  border-left-color: var(--ok);
+}
+
+.node.is-failed {
+  border-left-color: var(--fail);
+}
+
+.node.is-waiting_human {
+  border-left-color: var(--wait);
+}
+
+.node.is-skipped {
+  opacity: 0.55;
+}
+
+/* --- statuses --- */
+
+.status {
+  font-size: 0.85rem;
+}
+
+.status.is-running,
+.status.is-paused {
+  color: var(--run);
+}
+
+.status.is-completed,
+.status.is-done,
+.status.is-reused {
+  color: var(--ok);
+}
+
+.status.is-failed,
+.status.is-cancelled {
+  color: var(--fail);
+}
+
+.status.is-waiting_human {
+  color: var(--wait);
+}

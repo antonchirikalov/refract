@@ -22,3 +22,7 @@ docs/
 *.smoke-proj
 .illus-proj
 test-run/
+
+# frontend (SPEC-UI): deps and build output
+web/node_modules/
+web/dist/

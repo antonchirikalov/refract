@@ -648,6 +648,7 @@ refract rerun    <project_dir> --from NODE_ID [--reuse RUN_ID|last]   # default:
 refract answer   <run_dir> <step_id> <text>
 refract agents   list
 refract catalog  [--json]                                            # §19.1 (фаза 4)
+refract serve    [--projects-root PATH] [--host H] [--port P]         # §15 + UI (SPEC-UI)
 ```
 
 > CHANGED (2026-07-25): added `refract init` / `refract templates` (authoring
