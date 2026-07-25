@@ -23,6 +23,30 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _last_seq(path: Path) -> int:
+    """Highest ``seq`` already in ``events.jsonl`` (0 if absent/empty).
+
+    A resumed run appends to the existing file, so the writer must continue the
+    sequence instead of restarting at 1: ``seq`` is the WS replay cursor
+    (``?from_seq=``, SPEC §9/§15), and duplicates would hide every post-resume
+    event from a client that already saw the first pass.
+    """
+    if not path.exists():
+        return 0
+    last = 0
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                seq = int(json.loads(line).get("seq", 0))
+            except (ValueError, AttributeError):  # truncated tail after a crash
+                continue
+            last = max(last, seq)
+    return last
+
+
 class EventWriter:
     """Owns a run's ``events.jsonl``; the only writer of it (SPEC §9)."""
 
@@ -31,8 +55,8 @@ class EventWriter:
     ) -> None:
         self.path = Path(run_dir) / EVENTS_FILENAME
         self._clock = clock
-        self._seq = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._seq = _last_seq(self.path)  # resume continues the sequence
 
     def emit(self, event: Mapping[str, object]) -> Event:
         """Assign ``seq``/``ts`` and append the record (append-only, UTF-8)."""

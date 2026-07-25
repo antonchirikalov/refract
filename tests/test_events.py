@@ -50,21 +50,35 @@ class TestAppendOnlyJsonl:
         assert records[1].step_id == "gen"
         assert records[1].seq == 2
 
-    def test_append_only_new_writer_continues_seq_from_zero_but_keeps_old_lines(
-        self, tmp_path: Path
-    ) -> None:
-        # Verifies the file is truly append-only across writer instances; the
-        # engine only ever constructs one EventWriter per run, but the file's
-        # append semantics (never truncated) is the property under test.
+    def test_new_writer_appends_and_continues_seq(self, tmp_path: Path) -> None:
+        # SPEC §9/§15: a resumed run builds a second writer over the same file.
+        # It must append (never truncate) AND continue the sequence — `seq` is
+        # the WS replay cursor (?from_seq=), so restarting at 1 would hide every
+        # post-resume event from a client that already saw the first pass.
         writer1 = EventWriter(tmp_path, clock=_clock_seq())
+        writer1.emit({"type": "log"})
         writer1.emit({"type": "log"})
 
         writer2 = EventWriter(tmp_path, clock=_clock_seq())
-        writer2.emit({"type": "log"})
+        third = writer2.emit({"type": "log"})
 
+        assert third.seq == 3
         path = tmp_path / "events.jsonl"
         lines = path.read_text("utf-8").splitlines()
-        assert len(lines) == 2
+        assert len(lines) == 3
+        assert [json.loads(line)["seq"] for line in lines] == [1, 2, 3]
+
+    def test_seq_recovery_ignores_a_truncated_tail(self, tmp_path: Path) -> None:
+        # A crash mid-append can leave a partial last line; recovery must skip
+        # it rather than blow up, and continue from the last intact record.
+        path = tmp_path / "events.jsonl"
+        writer1 = EventWriter(tmp_path, clock=_clock_seq())
+        writer1.emit({"type": "log"})
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write('{"seq": 2, "ts": "T2", "ty')
+
+        writer2 = EventWriter(tmp_path, clock=_clock_seq())
+        assert writer2.emit({"type": "log"}).seq == 2
 
 
 class TestDefaults:
