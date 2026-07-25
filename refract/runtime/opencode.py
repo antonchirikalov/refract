@@ -194,6 +194,39 @@ def _model_ref(model: str) -> dict[str, str]:
     return {"providerID": provider, "modelID": model_id}
 
 
+class _TurnSnapshot:
+    """Best known state of the agent's turn, refreshed while it runs.
+
+    Filled from ``GET /session/{id}/message`` polls and finally from the POST
+    body if that ever returns. Keeps whichever parts list is richer, so a POST
+    body that carries none cannot erase what polling already saw.
+    """
+
+    def __init__(self) -> None:
+        self.info: dict[str, object] = {}
+        self.parts: list[dict[str, object]] = []
+
+    @property
+    def text(self) -> str:
+        return "".join(
+            str(p.get("text", ""))
+            for p in self.parts
+            if isinstance(p, dict) and p.get("type") == "text"
+        )
+
+    @property
+    def completed(self) -> bool:
+        """True once the server reports the assistant turn finished."""
+        time_info = self.info.get("time")
+        return bool(isinstance(time_info, dict) and time_info.get("completed"))
+
+    def absorb(self, info: object, parts: object) -> None:
+        if isinstance(info, dict):
+            self.info = info
+        if isinstance(parts, list) and len(parts) >= len(self.parts):
+            self.parts = [p for p in parts if isinstance(p, dict)]
+
+
 def _events_from_parts(
     step_id: str, parts: list[dict[str, object]]
 ) -> list[dict[str, object]]:
@@ -266,12 +299,14 @@ class OpencodeRuntime:
         exe: str | None = None,
         health_timeout_s: float = 60.0,
         heartbeat_s: float = 10.0,
+        poll_s: float = 5.0,
     ) -> None:
         self._providers = providers
         self._mcp = mcp
         self._exe = exe or shutil.which("opencode") or "opencode"
         self._health_timeout_s = health_timeout_s
         self._heartbeat_s = heartbeat_s
+        self._poll_s = poll_s
         self._procs: set[asyncio.subprocess.Process] = set()
         self._version_checked = False
 
@@ -295,7 +330,7 @@ class OpencodeRuntime:
         self._procs.add(proc)
         base = f"http://127.0.0.1:{port}"
         heartbeat: asyncio.Task[None] | None = None
-        agent_events: list[dict[str, object]] = []
+        snapshot = _TurnSnapshot()
         try:
             async with httpx.AsyncClient(
                 base_url=base, timeout=spec.timeout_s
@@ -306,42 +341,101 @@ class OpencodeRuntime:
                 session.raise_for_status()
                 session_id = session.json()["id"]
                 name = _agent_name(spec.agent_dir)
-                resp = await client.post(
-                    f"/session/{session_id}/message",
-                    json={
-                        "agent": name,
-                        "model": _model_ref(spec.model),
-                        "parts": [{"type": "text", "text": spec.prompt}],
-                    },
+                post = asyncio.create_task(
+                    client.post(
+                        f"/session/{session_id}/message",
+                        json={
+                            "agent": name,
+                            "model": _model_ref(spec.model),
+                            "parts": [{"type": "text", "text": spec.prompt}],
+                        },
+                    )
                 )
-                resp.raise_for_status()
-                body = resp.json()
-                # 1.18.x message response: {info: {error?, cost, tokens, ...}, parts}
-                info = body.get("info", {})
-                parts = body.get("parts", [])
-                text = "".join(
-                    p.get("text", "") for p in parts if p.get("type") == "text"
-                )
-                # Record the real turn parts (tool calls, reasoning, text) for I9
-                # instead of a stub, and surface tool calls as events (§9).
-                agent_events = _events_from_parts(spec.step_id, parts)
+                # The POST is not a reliable completion signal: on a live Extract
+                # run it stayed open long after the turn had written its outputs,
+                # burning the whole step timeout. So poll the session's messages
+                # alongside it — that both (a) keeps a usable trace even when the
+                # POST never returns (I9) and (b) lets a turn the server reports
+                # as completed finish the step.
+                try:
+                    while True:
+                        done, _ = await asyncio.wait({post}, timeout=self._poll_s)
+                        await self._poll_turn(client, session_id, snapshot)
+                        if done:
+                            resp = post.result()
+                            resp.raise_for_status()
+                            body = resp.json()
+                            # {info: {error?, cost, tokens, ...}, parts}; the POST
+                            # body can carry no parts, so keep the polled ones.
+                            snapshot.absorb(body.get("info"), body.get("parts"))
+                            break
+                        if snapshot.completed:
+                            break
+                finally:
+                    if not post.done():
+                        post.cancel()
+
+                agent_events = _events_from_parts(spec.step_id, snapshot.parts)
                 for tool_call in (e for e in agent_events if e["type"] == "tool_call"):
                     on_event(tool_call)
-                self._write_trace(spec, text, agent_events)
+                self._write_trace(spec, snapshot.text, agent_events)
+                info = snapshot.info
                 error = info.get("error")
                 return StepResult(
                     completed=True,
                     agent_error=json.dumps(error) if error else None,
                     usage={"cost": info.get("cost"), "tokens": info.get("tokens")},
                 )
+        except asyncio.CancelledError:
+            # The step timeout (§10.2) cancels us. CancelledError is a
+            # BaseException, so without this branch the one trace you most need
+            # — the step that hung — was the only one never written (I9).
+            self._write_trace(
+                spec,
+                snapshot.text or "[opencode: step timed out with no reply]",
+                _events_from_parts(spec.step_id, snapshot.parts),
+            )
+            raise
         except Exception as exc:  # server/transport failure → infra error (retryable)
-            self._write_trace(spec, f"[opencode infra error] {exc}", agent_events)
+            self._write_trace(
+                spec,
+                f"[opencode infra error] {exc}",
+                _events_from_parts(spec.step_id, snapshot.parts),
+            )
             return StepResult(completed=False, agent_error=None)
         finally:
             if heartbeat is not None:
                 heartbeat.cancel()
             await self._terminate(proc)
             self._procs.discard(proc)
+
+    async def _poll_turn(
+        self, client: object, session_id: str, snapshot: _TurnSnapshot
+    ) -> None:
+        """Refresh ``snapshot`` from the session's latest assistant message.
+
+        Never raises: a failed poll only means this tick learned nothing — the
+        POST task, the step timeout and the gate remain the deciding signals.
+        """
+        import httpx
+
+        assert isinstance(client, httpx.AsyncClient)
+        try:
+            resp = await client.get(f"/session/{session_id}/message", timeout=30)
+            if resp.status_code != 200:
+                return
+            messages = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return
+        if not isinstance(messages, list):
+            return
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            info = message.get("info")
+            if isinstance(info, dict) and info.get("role") == "assistant":
+                snapshot.absorb(info, message.get("parts"))
+                return
 
     async def _check_version(self, on_event: EventCallback) -> None:
         if self._version_checked:

@@ -140,6 +140,8 @@ def progress_line(record: Event) -> str | None:
         outcome = payload.get("outcome")
         if to == StepStatus.done.value:
             return f"  ok {step}"
+        if to == StepStatus.reused.value:  # not a failure — don't shout it
+            return f"  reused {step}"
         if to == StepStatus.waiting_human.value:
             return f"  ?? {step} waiting for human (refract answer)"
         detail = f" ({outcome})" if outcome else ""
