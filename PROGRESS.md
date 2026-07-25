@@ -41,7 +41,7 @@ clean). Remaining before the phase can be *signed off*: manual smoke on real ope
 | §11 | prompt assembly (jinja2 templates) | done |
 | §12 | runtime base (protocol, StepSpec/StepResult) + MockRuntime | done |
 | §12 | opencode compile (agent-md + opencode.json) | done (compile only; runtime exec + smoke doc are Phase 1) |
-| §14 | CLI (validate/run/status/resume) + agents list | done (rerun is Phase 1) |
+| §14 | CLI (validate/run/status/resume) + agents list | done (rerun is Phase 1; `answer` in Phase 3; `init`/`templates` authoring ergonomics added) |
 | §4 | examples/demo-project | done (demo_writer agent + scanner→map demo) |
 | §17 | migrate source_processor + requirements_writer | done (+ extract@v1 type/schema; refract-native prompts per I5) |
 | §18 | Phase 0 tests | done (models/registry/graph/steps/state/snapshot/scheduler/events/scanner/map/cli+E2E-golden/opencode_compile covered) |

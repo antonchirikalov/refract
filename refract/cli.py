@@ -747,6 +747,71 @@ def _print_run_summary(ledger: Ledger) -> None:
             typer.echo(f"  {nid:<20} {node.status.value}")
 
 
+# --- project scaffolding (SPEC §14) -----------------------------------------
+
+
+def _available_templates(app: AppConfig) -> list[str]:
+    """Pipeline template stems shipped in ``<library>/templates/`` (SPEC §14)."""
+    d = app.library_path / "templates"
+    return sorted(p.stem for p in d.glob("*.yaml")) if d.is_dir() else []
+
+
+def templates_impl(app: AppConfig) -> int:
+    """List available pipeline templates (SPEC §14)."""
+    names = _available_templates(app)
+    if not names:
+        typer.echo(f"no templates in {app.library_path / 'templates'}")
+        return EXIT_OK
+    for name in names:
+        typer.echo(name)
+    return EXIT_OK
+
+
+def init_impl(
+    project_dir: Path | str,
+    *,
+    template: str,
+    app: AppConfig,
+    name: str | None = None,
+    model: str = "openai/gpt-5.6",
+    force: bool = False,
+) -> int:
+    """Scaffold a new project from a library template (SPEC §14).
+
+    Copies ``<library>/templates/<template>.yaml`` into ``<project>/pipelines/``
+    and writes a minimal ``project.yaml`` + empty ``input/``. Pure scaffolding —
+    the caller runs ``refract validate`` next. Refuses to clobber an existing
+    ``project.yaml`` unless ``force``.
+    """
+    project_dir = Path(project_dir)
+    src = app.library_path / "templates" / f"{template}.yaml"
+    if not src.exists():
+        choices = ", ".join(_available_templates(app)) or "(none)"
+        raise UsageError(f"unknown template {template!r} (available: {choices})")
+    project_file = project_dir / "project.yaml"
+    if project_file.exists() and not force:
+        raise UsageError(f"{project_file} already exists (use --force to overwrite)")
+
+    (project_dir / "pipelines").mkdir(parents=True, exist_ok=True)
+    (project_dir / "input").mkdir(parents=True, exist_ok=True)
+    (project_dir / "pipelines" / f"{template}.yaml").write_text(
+        src.read_text("utf-8"), encoding="utf-8"
+    )
+    (project_dir / "input" / ".gitkeep").write_text("", encoding="utf-8")
+    config = {
+        "version": "0.1",
+        "name": name or project_dir.resolve().name,
+        "input": "./input",
+        "defaults": {"model": model},
+    }
+    project_file.write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+    typer.echo(f"initialized {project_dir} from template {template!r}")
+    typer.echo("next: add inputs to ./input, then `refract validate` and `refract run`")
+    return EXIT_OK
+
+
 # --- exceptions mapped to exit codes ----------------------------------------
 
 
@@ -884,6 +949,39 @@ def answer(
         return EXIT_OK if status_ is RunStatus.completed else EXIT_RUN_FAILED
 
     _run_cli(body)
+
+
+@app.command()
+def init(
+    project_dir: Path = typer.Argument(..., help="project directory to create"),
+    template: str = typer.Option(
+        ..., "--template", "-t", help="pipeline template name"
+    ),
+    name: str | None = typer.Option(None, "--name", help="project name"),
+    model: str = typer.Option(
+        "openai/gpt-5.6", "--model", help="default model (provider/model-id)"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="overwrite existing project.yaml"
+    ),
+) -> None:
+    """Scaffold a new project from a library template (§14)."""
+    _run_cli(
+        lambda: init_impl(
+            project_dir,
+            template=template,
+            app=load_app_config(),
+            name=name,
+            model=model,
+            force=force,
+        )
+    )
+
+
+@app.command()
+def templates() -> None:
+    """List available pipeline templates from the library (§14)."""
+    _run_cli(lambda: templates_impl(load_app_config()))
 
 
 @agents_app.command("list")

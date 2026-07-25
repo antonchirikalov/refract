@@ -607,13 +607,23 @@ Params: `exclude: list[str]` (точное имя, только верхний �
 ## 14. CLI (фазы 0–1)
 
 ```
+refract init     <project_dir> --template NAME [--name NAME] [--model PROVIDER/ID] [--force]
+refract templates
 refract validate <project_dir> [--pipeline NAME]
 refract run      <project_dir> [--pipeline NAME] [--model-for KEY=MODEL]... [--workers-for NODE=N]...
 refract status   <run_dir>
 refract resume   <run_dir> [--retry-failed] [--force-step STEP_ID]
 refract rerun    <project_dir> --from NODE_ID [--reuse RUN_ID|last]   # default: last
+refract answer   <run_dir> <step_id> <text>
 refract agents   list
 ```
+
+> CHANGED (2026-07-25): added `refract init` / `refract templates` (authoring
+> ergonomics) and documented `refract answer` (§16.10/HITL). `init` copies a
+> `<library>/templates/<name>.yaml` into `<project>/pipelines/` and writes a
+> minimal `project.yaml` + empty `input/`; it is pure scaffolding (no validation),
+> refusing to overwrite an existing `project.yaml` without `--force`. `templates`
+> lists the stems under `<library>/templates/`.
 
 `--pipeline` обязателен, если в `pipelines/` больше одного файла. Активный ран — по
 `.active.lock` (pid жив → отказ старта нового рана в проекте). Прогресс в stdout —
