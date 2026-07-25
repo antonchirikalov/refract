@@ -15,7 +15,10 @@ never echoed (I8); only the env-var name + availability flag are exposed.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +48,7 @@ from refract.cli import (
     run_impl,
     write_answer,
 )
+from refract.catalog import build_catalog
 from refract.events import EVENTS_FILENAME, utcnow_iso
 from refract.graph import load_agents, load_pipeline
 from refract.models.ledger import RunState
@@ -93,6 +97,17 @@ class AnswerRequest(BaseModel):
 class PipelineText(BaseModel):
     name: str
     yaml: str
+    hash: str = ""  # sha256 of the text — the client's next base_hash (§19.2)
+
+
+class PipelineWriteResponse(BaseModel):
+    """Result of a pipeline write (SPEC §19.2)."""
+
+    name: str
+    committed: bool
+    hash: str  # sha256 of what is now on disk
+    errors: list[ValidationError] = Field(default_factory=list)
+    warnings: list[ValidationError] = Field(default_factory=list)
 
 
 class ProviderInfo(BaseModel):
@@ -167,6 +182,47 @@ def create_app(
             if (candidate / "state.json").exists():
                 return candidate
         raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
+
+    def _validate_text(
+        project_dir: Path, name: str, text: str
+    ) -> tuple[list[ValidationError], list[ValidationError]]:
+        """Validate pipeline TEXT without touching the project's file (§19.2).
+
+        The candidate is written to a temp dir and loaded from there, so a failed
+        write never leaves a half-valid pipeline behind and a concurrent request
+        cannot see a scratch file in ``pipelines/``.
+        """
+        from refract.cli import _build_context
+        from refract.models.config import ProjectConfig
+
+        raw = yaml.safe_load((project_dir / "project.yaml").read_text("utf-8")) or {}
+        config = ProjectConfig.model_validate(raw)
+        registry = ArtifactRegistry.load(st.app_config.library_path)
+        agents, agent_errors = load_agents(st.app_config.library_path)
+        ctx = _build_context(
+            st.app_config,
+            registry=registry,
+            agents=agents,
+            default_model=config.defaults.model,
+            model_overrides={},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            candidate = Path(td) / f"{name}.yaml"
+            candidate.write_text(text, encoding="utf-8")
+            graph = load_pipeline(candidate, ctx)
+        errors: list[ValidationError] = []
+        warnings: list[ValidationError] = []
+        for e in list(agent_errors) + list(graph.errors):
+            item = ValidationError(
+                code=getattr(e.code, "value", str(e.code)),
+                node_id=getattr(e, "node_id", None),
+                message=getattr(e, "message", str(e)),
+            )
+            if getattr(e.code, "is_warning", False):
+                warnings.append(item)
+            else:
+                errors.append(item)
+        return errors, warnings
 
     def _collect_errors(
         project_dir: Path, pipeline: str, overrides: dict[str, str]
@@ -253,22 +309,61 @@ def create_app(
         path = pdir / "pipelines" / f"{name}.yaml"
         if not path.exists():
             raise HTTPException(status_code=404, detail=f"no pipeline {name!r}")
-        return PipelineText(name=name, yaml=path.read_text("utf-8"))
+        text = path.read_text("utf-8")
+        return PipelineText(name=name, yaml=text, hash=_text_hash(text))
 
     @api.put("/api/projects/{project_id}/pipelines/{name}")
     def put_pipeline(
-        project_id: str, name: str, body: str = Body(..., media_type="text/plain")
-    ) -> dict[str, str]:
+        project_id: str,
+        name: str,
+        body: str = Body(..., media_type="text/plain"),
+        allow_invalid: bool = Query(False),
+        base_hash: str | None = Query(None),
+    ) -> PipelineWriteResponse:
+        """Replace a pipeline: verify, then commit atomically (SPEC §19.2).
+
+        Blocking validation errors mean nothing is written — the editor gets the
+        full report back. ``allow_invalid`` saves the draft anyway (and still
+        reports). ``base_hash`` is optimistic locking against the text the client
+        read; omit it and no such check happens.
+        """
         pdir = _project_dir(project_id)
         active = _active_run(pdir / "runs")
         if active is not None:
             raise HTTPException(
-                status_code=409,
-                detail=f"project has an active run ({active})",
+                status_code=409, detail=f"project has an active run ({active})"
             )
-        (pdir / "pipelines").mkdir(exist_ok=True)
-        (pdir / "pipelines" / f"{name}.yaml").write_text(body, encoding="utf-8")
-        return {"name": name}
+        path = pdir / "pipelines" / f"{name}.yaml"
+        if base_hash is not None and _text_hash(_read_or_empty(path)) != base_hash:
+            raise HTTPException(
+                status_code=409,
+                detail="stale base_hash: the pipeline changed since you read it",
+            )
+
+        errors, warnings = _validate_text(pdir, name, body)
+        if errors and not allow_invalid:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "pipeline not written: validation failed",
+                    "errors": [e.model_dump() for e in errors],
+                    "warnings": [w.model_dump() for w in warnings],
+                },
+            )
+        path.parent.mkdir(exist_ok=True)
+        _atomic_write(path, body)
+        return PipelineWriteResponse(
+            name=name,
+            committed=True,
+            hash=_text_hash(body),
+            errors=errors,
+            warnings=warnings,
+        )
+
+    @api.get("/api/catalog")
+    def get_catalog() -> dict[str, Any]:
+        """The authoring catalog: what a pipeline can be built from (SPEC §19.1)."""
+        return build_catalog(st.app_config.library_path)
 
     @api.post("/api/projects/{project_id}/pipelines/{name}/validate")
     def validate_pipeline(project_id: str, name: str) -> ValidateResponse:
@@ -494,6 +589,28 @@ def create_app(
             return
 
     return api
+
+
+# --- module-level file helpers ------------------------------------------------
+
+
+def _text_hash(text: str) -> str:
+    """sha256 of pipeline text — the editor's optimistic-locking token (§19.2)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _read_or_empty(path: Path) -> str:
+    return path.read_text("utf-8") if path.exists() else ""
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via tmp + os.replace, like the ledger (I3 / §19.2).
+
+    A crash mid-write must not leave a truncated pipeline.yaml behind.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 # --- module-level WS helpers -------------------------------------------------

@@ -637,6 +637,7 @@ refract resume   <run_dir> [--retry-failed] [--force-step STEP_ID]
 refract rerun    <project_dir> --from NODE_ID [--reuse RUN_ID|last]   # default: last
 refract answer   <run_dir> <step_id> <text>
 refract agents   list
+refract catalog  [--json]                                            # §19.1 (фаза 4)
 ```
 
 > CHANGED (2026-07-25): added `refract init` / `refract templates` (authoring
@@ -655,6 +656,7 @@ heartbeat-строки в стиле spectra.
 ```
 GET/POST /api/projects
 GET  /api/projects/{id}/pipelines ; GET/PUT /api/projects/{id}/pipelines/{name}   # PUT при активном ране → 409
+GET  /api/catalog                              # каталог блоков, §19 (фаза 4)
 POST /api/projects/{id}/pipelines/{name}/validate
 POST /api/projects/{id}/runs {pipeline, overrides?, reuse_from?, force?}
 GET  /api/runs/{run_id}                        # state.json
@@ -728,8 +730,9 @@ docs/opencode-smoke.md.
 пересчитан только он и низ графа».
 
 **Фаза 2**: api/ + WS; фронт — отдельная UI-спека. **Фаза 3**: HITL, тиры capabilities,
-подтверждения (механика — §16.10). **Фаза 4**: патч-операции графа, каталог для
-билдер-LLM (вне этой спеки).
+подтверждения (механика — §16.10). **Фаза 4**: каталог для билдер-LLM +
+безопасная запись пайплайна — механика в §19 (патч-операции рассмотрены и
+отклонены там же).
 
 > DESIGN NOTE (2026-07-23, не реализовано): discovery-источник. Новый архетип входной
 > ноды (условно `type: discover`) — второй легальный производитель `collection<X>` «из
@@ -761,3 +764,80 @@ docs/opencode-smoke.md.
 - `test_opencode_compile`: пакет → agent-md + opencode.json (только генерация файлов, без запуска opencode).
 - `test_cli`: validate exit codes; run на demo-project (MockRuntime через DI); status-таблица; lock активного рана.
 - E2E golden: scanner→map(2 файла)→writer→loop(critic: revise→approved) на MockRuntime; полная проверка дерева run-каталога, state.json и events.jsonl.
+
+## 19. Каталог и патч-операции графа (фаза 4)
+
+> CHANGED (2026-07-25): раздел добавлен. §17 фаза 4 назвала «патч-операции графа,
+> каталог для билдер-LLM» и вынесла механику «вне этой спеки» — механика
+> специфицирована здесь. Причина: UI-редактор пайплайна (и билдер-LLM за ним) не
+> может править `pipeline.yaml` целиком через `PUT` — он затирает чужие правки,
+> теряет комментарии и не даёт валидировать НАМЕРЕНИЕ, только результат.
+
+### 19.1. Каталог блоков
+
+`GET /api/catalog`, `refract catalog [--json]` — один машинно-читаемый документ
+«из чего можно собрать пайплайн». Собирается из уже существующих источников
+(реестр типов §5, пакеты агентов §6, `BUILTINS` §13, модели мета-нод §8.1) — это
+проекция, НЕ новый формат данных на диске.
+
+```json
+{
+  "version": "0.1",
+  "artifact_types": [{"id": "extract@v1", "kind": "file", "format": "json",
+                      "inline": false, "rules": 2, "builtin": false}],
+  "agents": [{"ref": "source_processor@1", "description": "...",
+              "consumes": [{"port": "source", "type": "source@v1", "optional": false}],
+              "produces": [{"port": "extract", "type": "extract@v1"}],
+              "needs": ["read", "edit", "mcp:pdf-reader"], "max_tier": "moderate",
+              "timeout_s": 1800}],
+  "builtins": [{"type": "builtin/scanner", "produces": [...], "params_schema": {...}}],
+  "node_kinds": [{"kind": "loop", "params_schema": {...},
+                  "blocks": {"body": "agent", "critic": "agent"},
+                  "required": ["body", "critic", "outputs"]}],
+  "templates": ["extract", "discovery", "solution_design"],
+  "constraints": [{"code": "E_NESTED_MAP",
+                   "rule": "map: не может ссылаться на выход map/map_over-ноды"}]
+}
+```
+
+`constraints` — проекция §16: каждый пункт назван КОДОМ валидатора, который он
+вызовет. Билдер-LLM получает и правила, и словарь ошибок, на которых учится.
+Каталог не содержит секретов и путей (I8): провайдеры и модели отдаёт `GET /api/models`.
+
+### 19.2. Редактирование пайплайна: перезапись + верификация
+
+> CHANGED (2026-07-25): §19 изначально специфицировал словарь патч-операций
+> (`add_node`/`set_input`/…). Решение отменено ДО реализации: для UI-редактора он
+> не даёт ничего, чего не даёт полная перезапись с верификацией. Разбор: (1)
+> одновременные правки закрываются хэшом прочитанного файла, а не дельтами; (2)
+> комментарии сохраняет клиент, который держит исходный текст — round-trip на
+> сервере нужен только для дельт; (3) валидация «намерения» полностью покрыта
+> валидацией результата — коды §8.3 и так структурные; (4) дельты выигрывают на
+> больших файлах, а пайплайн — ~40 строк, LLM пишет его целиком надёжнее, чем
+> собирает патч. Пятнадцать операций и round-trip YAML — сложность без выгоды.
+> Вместе с ними отменена зависимость `ruamel.yaml`.
+
+`PUT /api/projects/{id}/pipelines/{name}` — единственный способ записи. Требования:
+
+1. **Валидация перед коммитом.** Тело валидируется полным валидатором §8.3.
+   Блокирующие ошибки → файл НЕ пишется, ответ `409` с полным отчётом.
+   `?allow_invalid=true` — сохранить черновик как есть (UI-«сохранить и продолжить
+   править»); отчёт возвращается всё равно.
+2. **Атомарность.** Запись только `tmp` + `os.replace` — как леджер (I3). Обрыв
+   посреди записи не оставляет обрезанный `pipeline.yaml`.
+3. **Оптимистичная блокировка.** Клиент передаёт `?base_hash=<sha256>` файла,
+   который прочитал; несовпадение → `409 stale` (кто-то записал раньше). Без
+   `base_hash` проверка не делается — CLI и скрипты не обязаны её знать.
+4. **Активный ран** в проекте → `409` (§16.1), как и сейчас.
+5. Ответ всегда: `{name, committed: bool, errors: [...], warnings: [...], hash}` —
+   `hash` нового содержимого, чтобы клиент сразу имел свежий `base_hash`.
+
+`POST .../validate` остаётся отдельно: проверить, не записывая (dry-run редактора).
+
+### 19.3. Обязательные тесты фазы 4
+
+- `test_catalog`: полнота (каждый агент/builtin/тип библиотеки присутствует); наличие
+  `constraints` с кодами §8.3; отсутствие секретов и абсолютных путей.
+- `test_pipeline_write`: невалидное тело → не записано + отчёт; `allow_invalid`
+  записывает; атомарность (файл цел при сбое); `base_hash` mismatch → 409;
+  активный ран → 409; успешный PUT возвращает свежий `hash`.

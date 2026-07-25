@@ -446,3 +446,31 @@ class TestE2EGolden:
             )
             assert payload.exists()
             assert payload.read_text("utf-8") == REQ
+
+
+# --- catalog (SPEC §19.1) ------------------------------------------------------
+
+
+class TestCatalogCommand:
+    def test_human_summary_lists_agents_and_builtins(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from refract.cli import catalog_impl
+
+        assert catalog_impl(_app(monkeypatch=monkeypatch)) == 0
+
+        out = capsys.readouterr().out
+        assert "source_processor@1" in out
+        assert "builtin/scanner" in out
+        assert "collection<extract@v1>" in out  # port types are shown
+
+    def test_json_output_is_the_whole_catalog(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from refract.cli import catalog_impl
+
+        assert catalog_impl(_app(monkeypatch=monkeypatch), as_json=True) == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["version"]
+        assert payload["agents"] and payload["builtins"] and payload["constraints"]

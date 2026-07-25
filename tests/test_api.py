@@ -202,3 +202,116 @@ def test_put_pipeline_and_models(client: TestClient) -> None:
     assert kimi["available"] is True
     # never echo secret values, only the env var name
     assert kimi["api_key_env"] == "MOONSHOT_API_KEY"
+
+
+# --- pipeline write: verify, then commit (SPEC §19.2/§19.3) -------------------
+
+_INVALID = """version: "0.1"
+name: demo
+nodes:
+  - id: write
+    type: agent
+    agent: no_such_agent@1
+    inputs: { sources: nowhere.sources }
+"""
+
+
+def test_put_rejects_invalid_pipeline_without_writing(client: TestClient) -> None:
+    before = client.get("/api/projects/demo-project/pipelines/demo").json()["yaml"]
+
+    resp = client.put(
+        "/api/projects/demo-project/pipelines/demo",
+        content=_INVALID,
+        headers={"Content-Type": "text/plain"},
+    )
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    codes = {e["code"] for e in detail["errors"]}
+    assert "E_UNKNOWN_AGENT" in codes
+    # nothing was written — the editor still sees the old pipeline
+    after = client.get("/api/projects/demo-project/pipelines/demo").json()["yaml"]
+    assert after == before
+
+
+def test_put_allow_invalid_saves_the_draft_and_still_reports(
+    client: TestClient,
+) -> None:
+    resp = client.put(
+        "/api/projects/demo-project/pipelines/demo?allow_invalid=true",
+        content=_INVALID,
+        headers={"Content-Type": "text/plain"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["committed"] is True
+    assert {e["code"] for e in body["errors"]}  # the report comes back anyway
+    assert client.get("/api/projects/demo-project/pipelines/demo").json()["yaml"] == (
+        _INVALID
+    )
+
+
+def test_put_returns_fresh_hash_matching_get(client: TestClient) -> None:
+    original = client.get("/api/projects/demo-project/pipelines/demo").json()
+    resp = client.put(
+        "/api/projects/demo-project/pipelines/demo",
+        content=original["yaml"],
+        headers={"Content-Type": "text/plain"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["hash"] == original["hash"]
+    assert (
+        client.get("/api/projects/demo-project/pipelines/demo").json()["hash"]
+        == (resp.json()["hash"])
+    )
+
+
+def test_put_with_stale_base_hash_is_refused(client: TestClient) -> None:
+    original = client.get("/api/projects/demo-project/pipelines/demo").json()["yaml"]
+
+    resp = client.put(
+        "/api/projects/demo-project/pipelines/demo?base_hash=" + "0" * 64,
+        content=original,
+        headers={"Content-Type": "text/plain"},
+    )
+
+    assert resp.status_code == 409
+    assert "stale" in str(resp.json()["detail"])
+
+
+def test_put_with_current_base_hash_succeeds(client: TestClient) -> None:
+    current = client.get("/api/projects/demo-project/pipelines/demo").json()
+
+    resp = client.put(
+        f"/api/projects/demo-project/pipelines/demo?base_hash={current['hash']}",
+        content=current["yaml"] + "\n# edited\n",
+        headers={"Content-Type": "text/plain"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["committed"] is True
+
+
+def test_put_leaves_no_tmp_file_behind(client: TestClient, tmp_path: Path) -> None:
+    current = client.get("/api/projects/demo-project/pipelines/demo").json()
+    client.put(
+        "/api/projects/demo-project/pipelines/demo",
+        content=current["yaml"],
+        headers={"Content-Type": "text/plain"},
+    )
+    # the atomic write goes through <name>.yaml.tmp + os.replace
+    pipelines = list((tmp_path / "projects").glob("demo-project/pipelines/*"))
+    assert [p.name for p in pipelines] == ["demo.yaml"]  # the real file is there
+    assert not [p for p in pipelines if p.suffix == ".tmp"]
+
+
+def test_catalog_endpoint_serves_the_authoring_catalog(client: TestClient) -> None:
+    resp = client.get("/api/catalog")
+
+    assert resp.status_code == 200
+    catalog = resp.json()
+    assert {a["ref"] for a in catalog["agents"]} >= {"source_processor@1"}
+    assert catalog["builtins"][0]["type"] == "builtin/scanner"
+    assert any(c["code"] == "E_NESTED_MAP" for c in catalog["constraints"])

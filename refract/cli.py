@@ -833,6 +833,37 @@ def templates_impl(app: AppConfig) -> int:
     return EXIT_OK
 
 
+def catalog_impl(app: AppConfig, *, as_json: bool = False) -> int:
+    """Print the authoring catalog (SPEC §19.1).
+
+    ``--json`` gives a builder (UI or LLM) the whole document; the default is a
+    human summary — the full JSON is thousands of lines.
+    """
+    from refract.catalog import build_catalog
+
+    catalog = build_catalog(app.library_path)
+    if as_json:
+        typer.echo(json.dumps(catalog, ensure_ascii=False, indent=2))
+        return EXIT_OK
+
+    typer.echo(f"catalog {catalog['version']} from {app.library_path}")
+    typer.echo(f"\nagents ({len(catalog['agents'])}):")
+    for entry in catalog["agents"]:
+        consumes = ", ".join(f"{p['port']}:{p['type']}" for p in entry["consumes"])
+        produces = ", ".join(f"{p['port']}:{p['type']}" for p in entry["produces"])
+        typer.echo(f"  {entry['ref']:<28} {consumes or '-'} -> {produces}")
+        typer.echo(f"  {'':<28} needs: {', '.join(entry['needs']) or '-'}")
+    typer.echo(f"\nbuiltins ({len(catalog['builtins'])}):")
+    for entry in catalog["builtins"]:
+        produces = ", ".join(f"{p['port']}:{p['type']}" for p in entry["produces"])
+        typer.echo(f"  {entry['type']:<28} -> {produces}")
+    typer.echo(f"\nnode kinds: {', '.join(k['kind'] for k in catalog['node_kinds'])}")
+    typer.echo(f"artifact types: {len(catalog['artifact_types'])}")
+    typer.echo(f"templates: {', '.join(catalog['templates']) or '-'}")
+    typer.echo(f"constraints: {len(catalog['constraints'])} (use --json for the rules)")
+    return EXIT_OK
+
+
 def init_impl(
     project_dir: Path | str,
     *,
@@ -1047,6 +1078,14 @@ def init(
 def templates() -> None:
     """List available pipeline templates from the library (§14)."""
     _run_cli(lambda: templates_impl(load_app_config()))
+
+
+@app.command()
+def catalog(
+    as_json: bool = typer.Option(False, "--json", help="full catalog as JSON"),
+) -> None:
+    """Print the catalog of blocks a pipeline can be built from (§19)."""
+    _run_cli(lambda: catalog_impl(load_app_config(), as_json=as_json))
 
 
 @agents_app.command("list")
