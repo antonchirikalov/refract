@@ -16,7 +16,7 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +29,8 @@ from refract.graph import ValidationContext, load_agents, load_pipeline
 from refract.models.agent import AgentSpec, tier_at_least
 from refract.models.config import McpFile, ProjectConfig, ProvidersFile
 from refract.models.ledger import (
+    Event,
+    EventType,
     NodeStatus,
     RunState,
     RunStatus,
@@ -116,6 +118,68 @@ def load_app_config() -> AppConfig:
 
 class UsageError(Exception):
     """A user-facing invocation error → exit code ``EXIT_USAGE``."""
+
+
+# --- live progress (SPEC §14: heartbeat lines in stdout) ---------------------
+
+
+def progress_line(record: Event) -> str | None:
+    """Render one event as a progress line, or ``None`` to stay silent.
+
+    ASCII only: a run's stdout is read on Windows consoles whose code page is
+    not UTF-8.
+    """
+    payload = record.payload
+    step = record.step_id or ""
+    if record.type is EventType.heartbeat:
+        return f"  .. {step} {payload.get('elapsed_s')}s"
+    if record.type is EventType.step_state_changed:
+        to = str(payload.get("to", ""))
+        if to == StepStatus.running.value:
+            return f"  -> {step}"
+        outcome = payload.get("outcome")
+        if to == StepStatus.done.value:
+            return f"  ok {step}"
+        if to == StepStatus.waiting_human.value:
+            return f"  ?? {step} waiting for human (refract answer)"
+        detail = f" ({outcome})" if outcome else ""
+        return f"  {to.upper()} {step}{detail}"
+    if record.type is EventType.node_state_changed:
+        node = payload.get("node_id", step)
+        to = str(payload.get("to", ""))
+        if to in {NodeStatus.done.value, NodeStatus.reused.value}:
+            return f"node {node}: {to}"
+        if to in {NodeStatus.failed.value, NodeStatus.skipped.value}:
+            return f"node {node}: {to.upper()}"
+        return None
+    if record.type is EventType.question:
+        return f"  ?? {step}: {payload.get('question')}"
+    return None
+
+
+class ProgressEventWriter(EventWriter):
+    """``EventWriter`` that also streams progress to stdout (SPEC §14).
+
+    Still the single writer of ``events.jsonl`` (§9) — rendering is a side
+    effect of the same ``emit``, so stdout can never disagree with the file.
+    """
+
+    def __init__(
+        self,
+        run_dir: Path | str,
+        *,
+        clock: Callable[[], str] = utcnow_iso,
+        echo: Callable[[str], None] = typer.echo,
+    ) -> None:
+        super().__init__(run_dir, clock=clock)
+        self._echo = echo
+
+    def emit(self, event: Mapping[str, object]) -> Event:
+        record = super().emit(event)
+        line = progress_line(record)
+        if line is not None:
+            self._echo(line)
+        return record
 
 
 # --- project + pipeline resolution ------------------------------------------
@@ -437,7 +501,7 @@ def run_impl(
         reuse_from=reuse_run_id,
         force_nodes=force_nodes,
     )
-    events = EventWriter(run_dir, clock=clock)
+    events = ProgressEventWriter(run_dir, clock=clock)
     runtime = runtime_factory(app, exec_pipeline)
 
     verb = f"rerun {run_id} (reuse {reuse_run_id})" if reuse_run_id else f"run {run_id}"
@@ -589,7 +653,7 @@ def resume_impl(
         _retry_failed(ledger)
     ledger.save()
 
-    events = EventWriter(run_dir, clock=clock)
+    events = ProgressEventWriter(run_dir, clock=clock)
     runtime = runtime_factory(app, pipeline_obj)
     _write_lock(run_dir)
     try:
@@ -797,7 +861,6 @@ def init_impl(
     (project_dir / "pipelines" / f"{template}.yaml").write_text(
         src.read_text("utf-8"), encoding="utf-8"
     )
-    (project_dir / "input" / ".gitkeep").write_text("", encoding="utf-8")
     config = {
         "version": "0.1",
         "name": name or project_dir.resolve().name,

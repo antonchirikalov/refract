@@ -181,6 +181,31 @@ class TestRunHappyPath:
         assert "write" in text
         assert "done" in text
 
+    def test_run_streams_step_progress_to_stdout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # SPEC §14: progress goes to stdout while the run is in flight — a real
+        # run is minutes of LLM calls and must not look hung.
+        project = _copy_demo_project(tmp_path)
+        app = _app(monkeypatch=monkeypatch)
+
+        run_impl(
+            project,
+            app=app,
+            runtime_factory=_mock_runtime_factory,
+            run_id="run_test",
+            clock=_clock_seq(),
+        )
+
+        out = capsys.readouterr().out
+        assert "-> scan" in out  # step started
+        assert "ok scan" in out  # step finished
+        assert "node write: done" in out  # node assembled
+        assert out.isascii()  # Windows consoles are not always UTF-8
+
 
 # --- 5. run: active-run lock conflict -----------------------------------------
 
