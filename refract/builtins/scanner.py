@@ -2,6 +2,8 @@
 
 Produces collection<source@v1> from the input folder: each top-level file and
 each subfolder becomes one source@v1 element (a subfolder is one element, whole).
+Top-level entries whose name starts with ``.`` are skipped — they are tooling
+artifacts (``.gitkeep``, ``.DS_Store``), not sources.
 Deterministic, no runner — runs in ``steps/<node>/main/`` and writes the output
 collection under ``output/<port>/`` (``_collection.json`` + per-slug payload dirs).
 
@@ -89,8 +91,8 @@ def run(
 
     entries = [] if not input_dir.is_dir() else sorted(input_dir.iterdir())
     for entry in entries:
-        if entry.name in exclude:
-            continue
+        if entry.name in exclude or entry.name.startswith("."):
+            continue  # dot-entries are tooling artifacts, never sources (SPEC §13)
         slug = unique_slug(slugify(entry.name), taken)
         taken.add(slug)
         slug_dir = collection_dir / slug

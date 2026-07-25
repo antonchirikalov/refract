@@ -171,6 +171,28 @@ class TestScannerRun:
         assert manifest.stats.total == 1
         assert [item.source for item in manifest.items] == ["a.txt"]
 
+    def test_dot_entries_are_never_sources(self, tmp_path: Path) -> None:
+        # SPEC §13 CHANGED 2026-07-25: top-level dot-entries are tooling
+        # artifacts, skipped without being listed in exclude.
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "a.txt").write_text("keep", encoding="utf-8")
+        (input_dir / ".gitkeep").write_text("", encoding="utf-8")
+        (input_dir / ".DS_Store").write_text("junk", encoding="utf-8")
+        hidden = input_dir / ".git"
+        hidden.mkdir()
+        (hidden / "config").write_text("ignored", encoding="utf-8")
+
+        manifest = scanner.run(
+            params=scanner.ScannerParams(),
+            input_dir=input_dir,
+            output_dir=tmp_path / "out",
+            port="sources",
+        )
+
+        assert manifest.stats.total == 1
+        assert [item.source for item in manifest.items] == ["a.txt"]
+
     def test_empty_or_missing_input_dir(self, tmp_path: Path) -> None:
         # SPEC §13: missing input dir -> empty collection, not an error.
         output_dir = tmp_path / "out"

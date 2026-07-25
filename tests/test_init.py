@@ -51,7 +51,9 @@ def test_init_scaffolds_and_validates(
     )
     assert code == 0
     assert (proj / "pipelines" / "extract.yaml").exists()
-    assert (proj / "input" / ".gitkeep").exists()
+    # empty input/, no .gitkeep: the scanner would turn it into a bogus source
+    assert (proj / "input").is_dir()
+    assert list((proj / "input").iterdir()) == []
     config = yaml.safe_load((proj / "project.yaml").read_text("utf-8"))
     assert config["name"] == "Atlas"
     assert config["defaults"]["model"] == "kimi/kimi-k3"
