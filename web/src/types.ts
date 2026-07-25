@@ -62,6 +62,7 @@ export interface RunSummary {
   pipeline: string
   created_at: string
   finished_at: string | null
+  awaiting_checkpoint: string | null
 }
 
 export interface NodeState {

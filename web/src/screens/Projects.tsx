@@ -66,7 +66,10 @@ export function Projects() {
                 </p>
                 {card.lastRun ? (
                   <p className={`status is-${card.lastRun.status}`}>
-                    last run {card.lastRun.status} · {card.lastRun.created_at}
+                    {card.lastRun.awaiting_checkpoint
+                      ? `parked at ${card.lastRun.awaiting_checkpoint} — open to continue`
+                      : `last run ${card.lastRun.status}`}{' '}
+                    · {card.lastRun.created_at}
                   </p>
                 ) : (
                   <p className="muted">never run</p>

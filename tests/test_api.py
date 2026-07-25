@@ -638,3 +638,44 @@ def test_pipeline_graph_reports_declared_checkpoints(
     graph = client.get("/api/projects/demo-project/pipelines/demo/graph").json()
 
     assert graph["checkpoints"] == ["scan"]
+
+
+def test_project_runs_report_where_a_run_is_parked(client: TestClient) -> None:
+    # Reopening a project later must show that its pipeline stopped at a checkpoint
+    # and where — without opening the run (SPEC §21.3).
+    started = client.post(
+        "/api/projects/demo-project/runs",
+        json={"pipeline": "demo", "stop_after": ["scan"]},
+    )
+    run_id = started.json()["run_id"]
+    _wait_status(client, run_id, {"waiting_human"})
+
+    runs = client.get("/api/projects/demo-project/runs").json()
+
+    assert runs[0]["run_id"] == run_id
+    assert runs[0]["status"] == "waiting_human"
+    assert runs[0]["awaiting_checkpoint"] == "scan"
+
+
+def test_a_parked_runs_history_replays_over_the_socket(client: TestClient) -> None:
+    # The pipeline log is events.jsonl (SPEC §9): a client that connects later must
+    # get the whole history, not just what happens from now on.
+    started = client.post(
+        "/api/projects/demo-project/runs",
+        json={"pipeline": "demo", "stop_after": ["scan"]},
+    )
+    run_id = started.json()["run_id"]
+    _wait_status(client, run_id, {"waiting_human"})
+
+    received = []
+    with client.websocket_connect(f"/api/runs/{run_id}/events?from_seq=1") as ws:
+        try:
+            while True:
+                received.append(ws.receive_json())
+        except Exception:  # noqa: BLE001 — the server closes when the run is parked
+            pass
+
+    kinds = {e["type"] for e in received}
+    assert "step_state_changed" in kinds
+    assert "question" in kinds  # the checkpoint asked for a human
+    assert [e["seq"] for e in received] == sorted(e["seq"] for e in received)

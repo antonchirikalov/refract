@@ -124,6 +124,9 @@ class RunSummary(BaseModel):
     pipeline: str
     created_at: str
     finished_at: str | None = None
+    # set when the run is parked at a checkpoint (SPEC §21) — lets a project list
+    # show "parked at <node>, continue here" without opening the run
+    awaiting_checkpoint: str | None = None
 
 
 class ValidationError(BaseModel):
@@ -456,6 +459,7 @@ def create_app(
                     pipeline=state.pipeline,
                     created_at=state.created_at,
                     finished_at=state.finished_at,
+                    awaiting_checkpoint=state.awaiting_checkpoint,
                 )
             )
         return out

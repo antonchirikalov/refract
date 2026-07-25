@@ -66,6 +66,7 @@ export function Project({ project }: { project: string }) {
     }
   }
 
+  const parkedRun = runs.find((r) => r.awaiting_checkpoint) ?? null
   const wantsBrief = graph?.input_mode === 'brief'
   const blocking = (errors ?? []).length > 0
   const hasInput = (input?.entries.length ?? 0) > 0
@@ -99,6 +100,22 @@ export function Project({ project }: { project: string }) {
       </header>
 
       {error ? <pre className="error">{error}</pre> : null}
+
+      {parkedRun ? (
+        <div className="panel warn">
+          <h3>A run is waiting for you</h3>
+          <p>
+            Parked at <code>{parkedRun.awaiting_checkpoint}</code>. Reopen it to
+            review the output and continue where it stopped.
+          </p>
+          <a
+            className="button primary"
+            href={href({ screen: 'run', project, runId: parkedRun.run_id })}
+          >
+            Continue run
+          </a>
+        </div>
+      ) : null}
 
       {blocking ? (
         <div className="panel error">
@@ -182,7 +199,11 @@ export function Project({ project }: { project: string }) {
               <a href={href({ screen: 'run', project, runId: r.run_id })}>
                 <code>{r.run_id}</code>
               </a>
-              <span className={`status is-${r.status}`}>{r.status}</span>
+              <span className={`status is-${r.status}`}>
+                {r.awaiting_checkpoint
+                  ? `parked at ${r.awaiting_checkpoint}`
+                  : r.status}
+              </span>
               <span className="muted">{r.pipeline}</span>
               <span className="muted">{r.created_at}</span>
             </li>
