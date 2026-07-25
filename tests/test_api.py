@@ -679,3 +679,25 @@ def test_a_parked_runs_history_replays_over_the_socket(client: TestClient) -> No
     assert "step_state_changed" in kinds
     assert "question" in kinds  # the checkpoint asked for a human
     assert [e["seq"] for e in received] == sorted(e["seq"] for e in received)
+
+
+def test_artifacts_of_map_elements_and_loop_rounds_are_reachable(
+    client: TestClient,
+) -> None:
+    # The API used to build the path from the step id directly, so composite ids
+    # ("extract:slug", "refine.body:r1") 404'd — exactly the outputs a reviewer wants
+    # to open. step_workdir() in the engine is now the single source of that naming.
+    started = client.post("/api/projects/demo-project/runs", json={"pipeline": "demo"})
+    run_id = started.json()["run_id"]
+    state = _wait_completed(client, run_id)
+
+    element_steps = [sid for sid in state["steps"] if sid.startswith("write:")]
+    assert element_steps, "the demo map node should have element steps"
+    for step_id in element_steps:
+        resp = client.get(f"/api/runs/{run_id}/steps/{step_id}/artifacts")
+        assert resp.status_code == 200, step_id
+        assert resp.json()
+
+    # a node id still resolves to its assembled output
+    node = client.get(f"/api/runs/{run_id}/steps/write/artifacts")
+    assert node.status_code == 200

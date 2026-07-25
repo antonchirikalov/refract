@@ -221,3 +221,23 @@ class TestRunScoped:
 
         with pytest.raises(UsageError, match="stop-after"):
             _run(project, _app(monkeypatch), stop_after=["nope"])
+
+
+class TestNoDoubleExecution:
+    def test_resuming_a_run_that_is_already_executing_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Seen live: the UI answered a checkpoint and also called resume, so two
+        # schedulers ran over one ledger — the second killed the first mid-node and
+        # left the run failed with a node stuck at `running`. A live lock on THIS run
+        # is now a conflict, not just a lock on a different run (§16.1).
+        from refract.cli import ActiveRunConflict, _LOCK_NAME
+
+        app = _app(monkeypatch)
+        project = _project(tmp_path, checkpoints=["scan"])
+        _, run_dir = _run(project, app)
+        write_answer(run_dir, "scan", "continue")
+        (run_dir / _LOCK_NAME).write_text(str(__import__("os").getpid()), "utf-8")
+
+        with pytest.raises(ActiveRunConflict):
+            resume_impl(run_dir, app=app, runtime_factory=_factory, clock=_clock_seq())

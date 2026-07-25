@@ -62,7 +62,7 @@ dependencies = [
   "typer>=0.12", "jinja2>=3.1",
 ]
 [project.optional-dependencies]
-api = ["fastapi>=0.111", "uvicorn>=0.30"]        # фаза 2
+api = ["fastapi>=0.111", "uvicorn[standard]>=0.30"]   # фаза 2
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5", "mypy>=1.10"]
 [project.scripts]
 refract = "refract.cli:app"
@@ -71,6 +71,11 @@ asyncio_mode = "auto"
 [tool.mypy]
 strict = true
 ```
+
+> CHANGED (2026-07-25): `uvicorn` → `uvicorn[standard]`. Без extras uvicorn НЕ умеет
+> WebSocket, и `refract serve` отвечал на `/api/runs/{id}/events` «Unsupported upgrade
+> request» — живая лента событий (§15) была мертва в реальном сервере, хотя тесты
+> (TestClient) её проходили. Выявлено прогоном UI в браузере.
 
 Конвенции:
 - Все форматы файлов из спеки — pydantic-модели в `refract/models/`; ad-hoc парсинг YAML/JSON запрещён.

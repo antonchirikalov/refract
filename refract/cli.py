@@ -686,8 +686,12 @@ def resume_impl(
     pipeline_obj, agents = _load_snapshot(run_dir, library_path=app.library_path)
     registry = ArtifactRegistry.load(app.library_path)
 
-    active = _active_run(run_dir.parent)  # one active run per project (§16.1)
-    if active is not None and active != run_dir.name:
+    # One active execution per project (§16.1) — including THIS run: a live lock on
+    # the run being resumed means someone is already executing it, and two schedulers
+    # over one ledger corrupt each other (seen live: a second resume killed the first
+    # mid-node, leaving the run failed with a node stuck at `running`).
+    active = _active_run(run_dir.parent)
+    if active is not None:
         raise ActiveRunConflict(active)
 
     ledger = Ledger.load(run_dir)  # crash recovery: running → pending

@@ -38,6 +38,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from refract.cli import (
+    ActiveRunConflict,
     AppConfig,
     RuntimeFactory,
     UsageError,
@@ -62,6 +63,7 @@ from refract.models.pipeline import (
     SelectNode,
 )
 from refract.registry import ArtifactRegistry
+from refract.state import step_workdir
 from refract.templates_lib import (
     TEMPLATES_SUBDIR,
     find_template,
@@ -364,13 +366,19 @@ def create_app(
         return out
 
     def _artifact_base(run_dir: Path, step_id: str) -> Path:
-        """Resolve a step's output dir (plain/builtin ``main/output`` or ``_out``)."""
-        out = run_dir / "steps" / step_id / "main" / "output"
+        """Resolve a step's (or node's) output dir for artifact listing.
+
+        A step id maps to its workdir via the engine's own naming
+        (:func:`step_workdir`); a NODE id additionally resolves to the assembled
+        ``_out`` of a map/loop/select/discover node, which is what the UI links to
+        for a checkpoint.
+        """
+        out = step_workdir(run_dir, step_id) / "output"
         if out.is_dir():
             return out
-        alt = run_dir / "steps" / step_id / "_out"
-        if alt.is_dir():
-            return alt
+        assembled = run_dir / "steps" / step_id / "_out"
+        if assembled.is_dir():
+            return assembled
         raise HTTPException(
             status_code=404, detail=f"no artifacts for step {step_id!r}"
         )
@@ -802,12 +810,25 @@ def create_app(
     @api.post("/api/runs/{run_id}/resume")
     async def resume_run(run_id: str) -> dict[str, str]:
         run_dir = _find_run_dir(run_id)
+        _guard_not_executing(run_id)
         rec = st.runs.get(run_id) or RunRecord(
             run_dir=run_dir, project_id=run_dir.parent.parent.name
         )
         st.runs[run_id] = rec
 
-        async def _launch() -> None:
+        rec.status = "running"
+        rec.task = asyncio.create_task(_resume_task(rec, run_dir))
+        return {"run_id": run_id}
+
+    async def _resume_task(rec: RunRecord, run_dir: Path) -> None:
+        """Resume a run, waiting briefly for its previous executor to let go.
+
+        A parked run publishes ``waiting_human`` in the ledger a moment before its
+        executor exits and drops ``.active.lock``. A client that answers instantly
+        (the UI does) would otherwise hit that lock and the resume would be dropped
+        on the floor — which is exactly what a live browser run showed.
+        """
+        for attempt in range(20):
             try:
                 status = await asyncio.to_thread(
                     resume_impl,
@@ -817,20 +838,33 @@ def create_app(
                     clock=st.clock,
                 )
                 rec.status = status.value
+                return
+            except ActiveRunConflict:
+                if attempt == 19:
+                    rec.status = "failed"
+                    rec.error = "run is still locked by another executor"
+                    return
+                await asyncio.sleep(0.25)
             except asyncio.CancelledError:
                 rec.status = "cancelled"
                 raise
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 — surfaced as run status
                 rec.status = "failed"
                 rec.error = str(e)
+                return
 
-        rec.status = "running"
-        rec.task = asyncio.create_task(_launch())
-        return {"run_id": run_id}
+    def _guard_not_executing(run_id: str) -> None:
+        """Refuse to start a second execution of a run already in flight (§16.1)."""
+        rec = st.runs.get(run_id)
+        if rec is not None and rec.task is not None and not rec.task.done():
+            raise HTTPException(
+                status_code=409, detail=f"run {run_id} is already executing"
+            )
 
     @api.post("/api/runs/{run_id}/answers")
     async def answer_run(run_id: str, req: AnswerRequest) -> dict[str, str]:
         run_dir = _find_run_dir(run_id)
+        _guard_not_executing(run_id)
         try:
             write_answer(run_dir, req.step_id, req.answer)
         except UsageError as e:
@@ -840,25 +874,8 @@ def create_app(
         )
         st.runs[run_id] = rec
 
-        async def _launch() -> None:
-            try:
-                status = await asyncio.to_thread(
-                    resume_impl,
-                    run_dir,
-                    app=st.app_config,
-                    runtime_factory=st.runtime_factory,
-                    clock=st.clock,
-                )
-                rec.status = status.value
-            except asyncio.CancelledError:
-                rec.status = "cancelled"
-                raise
-            except Exception as e:  # noqa: BLE001
-                rec.status = "failed"
-                rec.error = str(e)
-
         rec.status = "running"
-        rec.task = asyncio.create_task(_launch())
+        rec.task = asyncio.create_task(_resume_task(rec, run_dir))
         return {"run_id": run_id}
 
     # --- models + fs ---------------------------------------------------------

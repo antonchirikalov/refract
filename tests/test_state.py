@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from refract.models.ledger import NodeStatus, RunStatus, StepOutcome, StepStatus
-from refract.state import STATE_FILENAME, Ledger
+from refract.state import STATE_FILENAME, Ledger, step_workdir
 
 
 def _make_ledger(run_dir: Path) -> Ledger:
@@ -211,3 +211,32 @@ def test_enum_values_serialize_as_strings(tmp_path: Path) -> None:
 def test_node_ids_lists_all_nodes(tmp_path: Path) -> None:
     ledger = _make_ledger(tmp_path)
     assert set(ledger.node_ids()) == {"a", "b"}
+
+
+class TestStepWorkdir:
+    """step_id → step directory, the one place that knows the naming (§9/§10.2)."""
+
+    def test_plain_and_builtin_steps_live_under_main(self, tmp_path: Path) -> None:
+        assert step_workdir(tmp_path, "scan") == tmp_path / "steps" / "scan" / "main"
+
+    def test_map_element_uses_its_slug(self, tmp_path: Path) -> None:
+        assert (
+            step_workdir(tmp_path, "extract:rfp-excerpt-md")
+            == tmp_path / "steps" / "extract" / "rfp-excerpt-md"
+        )
+
+    def test_loop_round_matches_the_engine_layout(self, tmp_path: Path) -> None:
+        assert (
+            step_workdir(tmp_path, "refine.body:r1")
+            == tmp_path / "steps" / "refine" / "body_r1"
+        )
+        assert (
+            step_workdir(tmp_path, "refine.critic:r2")
+            == tmp_path / "steps" / "refine" / "critic_r2"
+        )
+
+    def test_selector_step(self, tmp_path: Path) -> None:
+        assert (
+            step_workdir(tmp_path, "choose.selector")
+            == tmp_path / "steps" / "choose" / "selector"
+        )

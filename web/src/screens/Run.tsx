@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { api, openEvents } from '../api'
+import { api, ApiError, openEvents } from '../api'
 import { Graph } from '../components/Graph'
 import { href } from '../route'
 import type { NodeStatus, PipelineGraph, RunEvent, RunState } from '../types'
@@ -16,28 +16,60 @@ export function Run({ project, runId }: { project: string; runId: string }) {
   const [answer, setAnswer] = useState('')
   const [error, setError] = useState<string | null>(null)
   const seqRef = useRef(0)
+  const statusRef = useRef<string>('created') // read by the socket's reconnect check
 
   // The ledger is the source of truth (I7): the socket tells us WHEN to re-read it.
   useEffect(() => {
     let alive = true
+    // A just-started run is launched in the background, so the ledger may not exist
+    // for a moment: a 404 here means "not yet", not an error worth showing.
     const refresh = () =>
       api
         .run(runId)
         .then((s) => {
-          if (alive) setState(s)
+          if (alive) {
+            statusRef.current = s.status
+            setState(s)
+            setError(null)
+          }
         })
-        .catch((e) => alive && setError(String(e)))
+        .catch((e) => {
+          if (alive && !(e instanceof ApiError && e.status === 404)) {
+            setError(String(e))
+          }
+        })
     void refresh()
-    const ws = openEvents(runId, seqRef.current + 1, (raw) => {
-      const event = raw as RunEvent
-      seqRef.current = Math.max(seqRef.current, event.seq)
-      setEvents((prev) => [...prev.slice(-400), event])
-      if (event.type !== 'heartbeat') void refresh()
-    })
-    const poll = window.setInterval(refresh, 5000) // WS closes on terminal states
+
+    // The server closes the socket on every state where no events can follow —
+    // including waiting_human. A parked run that a human then continues would
+    // otherwise show a feed frozen at the checkpoint, so reconnect from the last
+    // seq we saw and only stop once the run is really finished.
+    let socket: WebSocket | null = null
+    let retry: number | undefined
+    const connect = () => {
+      if (!alive) return
+      socket = openEvents(
+        runId,
+        seqRef.current + 1,
+        (raw) => {
+          const event = raw as RunEvent
+          seqRef.current = Math.max(seqRef.current, event.seq)
+          setEvents((prev) => [...prev.slice(-400), event])
+          if (event.type !== 'heartbeat') void refresh()
+        },
+        () => {
+          if (!alive || TERMINAL.has(statusRef.current)) return
+          retry = window.setTimeout(connect, 2000)
+        },
+      )
+    }
+    connect()
+
+    const poll = window.setInterval(refresh, 5000)
     return () => {
       alive = false
-      ws.close()
+      socket?.close()
+      window.clearTimeout(retry)
       window.clearInterval(poll)
     }
   }, [runId])
@@ -68,8 +100,9 @@ export function Run({ project, runId }: { project: string; runId: string }) {
   // editing it on disk is allowed — then continue, and the rest of the graph runs.
   async function decideCheckpoint(node: string, decision: string) {
     try {
+      // POST /answers resumes the run itself; a second resume would put two
+      // schedulers on one ledger, which the server now refuses anyway.
       await api.answer(runId, node, decision)
-      await api.resumeRun(runId)
     } catch (e) {
       setError(String(e))
     }
@@ -208,7 +241,7 @@ export function Run({ project, runId }: { project: string; runId: string }) {
               .reverse()
               .map((e) => (
                 <li key={e.seq}>
-                  <span className="muted">{e.ts}</span>{' '}
+                  <span className="muted">{e.ts.slice(11, 19)}</span>{' '}
                   <span className="tag">{e.type}</span>{' '}
                   {e.step_id ? <code>{e.step_id}</code> : null}{' '}
                   <span className="muted">{summarize(e)}</span>

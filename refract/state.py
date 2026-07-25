@@ -29,6 +29,27 @@ STATE_FILENAME = "state.json"
 _TMP_SUFFIX = ".tmp"
 
 
+def step_workdir(run_dir: Path, step_id: str) -> Path:
+    """Directory of a step, from its ledger id (SPEC §9/§10.2/§10.3).
+
+    The one place that knows the naming, because a step id is not a path:
+    ``scan`` → ``steps/scan/main``, ``extract:rfp-md`` → ``steps/extract/rfp-md``,
+    ``refine.body:r1`` → ``steps/refine/body_r1``, ``choose.selector`` →
+    ``steps/choose/selector``. The API used to guess and so could not reach the
+    artifacts of map elements or loop rounds at all.
+    """
+    head, _, leaf = step_id.partition(":")
+    node, _, block = head.partition(".")
+    base = Path(run_dir) / "steps" / node
+    if block and leaf:  # loop sub-step: body/critic of a round
+        return base / f"{block}_{leaf}"
+    if block:  # select's selector
+        return base / block
+    if leaf:  # map element
+        return base / leaf
+    return base / "main"
+
+
 class Ledger:
     """Owns a run's ``state.json`` and is the only writer of it (I3)."""
 
