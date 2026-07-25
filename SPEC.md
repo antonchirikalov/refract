@@ -258,12 +258,12 @@ providers:
   # встроенный в opencode провайдер — достаточно ключа
   openai: { api_key_env: OPENAI_API_KEY, max_concurrent: 4, models: [gpt-5.6] }
   # OpenAI-совместимый провайдер (Kimi/Moonshot) — нужны npm + base_url + каталог
-  kimi:
+  kimi:                       # Kimi For Coding plan; base_url зависит от типа ключа
     api_key_env: MOONSHOT_API_KEY
     max_concurrent: 4
     npm: "@ai-sdk/openai-compatible"
-    base_url: "https://api.moonshot.ai/v1"
-    models: [kimi-k2.7-code, kimi-k2.6]
+    base_url: "https://api.kimi.com/coding/v1"   # sk-kimi-… ключ (coding-план)
+    models: [k3, k3-256k, kimi-for-coding, kimi-for-coding-highspeed]
 library_path: /path/to/refract/library
 
 # mcp.yaml
