@@ -26,3 +26,6 @@ test-run/
 # frontend (SPEC-UI): deps and build output
 web/node_modules/
 web/dist/
+
+web/test-results/
+web/playwright-report/

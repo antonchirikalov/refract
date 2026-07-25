@@ -18,7 +18,16 @@ export function NewProject() {
 
   useEffect(() => {
     void api.templates().then(setTemplates).catch((e) => setError(String(e)))
-    void api.models().then(setProviders).catch(() => setProviders([]))
+    void api
+      .models()
+      .then((list) => {
+        setProviders(list)
+        // A project without defaults.model is born invalid (E_MODEL_UNRESOLVED): the
+        // engine has no default of its own, so preselect the first usable model.
+        const usable = list.find((p) => p.available && p.models.length)
+        if (usable) setModel(`${usable.name}/${usable.models[0]}`)
+      })
+      .catch(() => setProviders([]))
   }, [])
 
   const chosen = templates?.find((t) => t.name === template) ?? null
@@ -54,6 +63,7 @@ export function NewProject() {
 
   const ready =
     name.trim().length > 0 &&
+    model.length > 0 && // no model means a pipeline that cannot pass validation
     (!wantsBrief ? true : brief.trim().length > 0) &&
     !busy
 
@@ -128,7 +138,9 @@ export function NewProject() {
       <label className="field">
         <span>Default model</span>
         <select value={model} onChange={(e) => setModel(e.target.value)}>
-          <option value="">engine default</option>
+          <option value="" disabled>
+            pick a model
+          </option>
           {providers.flatMap((p) =>
             p.models.map((id) => (
               <option
