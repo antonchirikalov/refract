@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 from refract.models.ledger import (
@@ -27,6 +28,32 @@ from refract.models.ledger import (
 
 STATE_FILENAME = "state.json"
 _TMP_SUFFIX = ".tmp"
+
+
+_REPLACE_ATTEMPTS = 25
+_REPLACE_BACKOFF_S = 0.02
+
+
+def read_state(run_dir: Path | str) -> dict[str, object]:
+    """Read ``state.json``, tolerating a write in flight (SPEC §9).
+
+    The writer replaces the file atomically, but a reader can still catch the moment
+    between two handles and see nothing at all, so an empty/partial read is retried
+    rather than reported as corruption.
+    """
+    path = Path(run_dir) / STATE_FILENAME
+    last: Exception | None = None
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            data = json.loads(path.read_text("utf-8"))
+            assert isinstance(data, dict)
+            return data
+        except (json.JSONDecodeError, PermissionError, OSError) as exc:
+            last = exc
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                break
+            time.sleep(_REPLACE_BACKOFF_S)
+    raise RuntimeError(f"could not read {path}: {last}")
 
 
 def step_workdir(run_dir: Path, step_id: str) -> Path:
@@ -95,7 +122,7 @@ class Ledger:
     def load(cls, run_dir: Path | str) -> "Ledger":
         """Load ``state.json`` and apply crash recovery (``running → pending``)."""
         run_dir = Path(run_dir)
-        raw = json.loads((run_dir / STATE_FILENAME).read_text("utf-8"))
+        raw = read_state(run_dir)
         state = RunState.model_validate(raw)
         ledger = cls(run_dir, state)
         if ledger._recover_running():
@@ -116,14 +143,27 @@ class Ledger:
         return changed
 
     def save(self) -> None:
-        """Atomically write ``state.json`` (tmp + os.replace, UTF-8) — I3."""
+        """Atomically write ``state.json`` (tmp + os.replace, UTF-8) — I3.
+
+        The replace is retried briefly: on Windows it raises PermissionError while a
+        reader holds the destination open, and readers are constant (a UI polls this
+        file). Losing a whole run because a viewer looked at it at the wrong moment is
+        not acceptable — and that is exactly what happened before this retry.
+        """
         self.run_dir.mkdir(parents=True, exist_ok=True)
         text = json.dumps(
             self.state.model_dump(mode="json"), indent=2, ensure_ascii=False
         )
         tmp = self.run_dir / (STATE_FILENAME + _TMP_SUFFIX)
         tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, self.path)
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp, self.path)
+                return
+            except PermissionError:
+                if attempt == _REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(_REPLACE_BACKOFF_S)
 
     # --- run-level mutations -----------------------------------------------
 

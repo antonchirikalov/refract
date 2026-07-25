@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { api, ApiError, openEvents } from '../api'
-import { Graph } from '../components/Graph'
+import { Graph, type GraphSelection } from '../components/Graph'
 import { href } from '../route'
 import type { NodeStatus, PipelineGraph, RunEvent, RunState } from '../types'
 
@@ -12,7 +12,7 @@ export function Run({ project, runId }: { project: string; runId: string }) {
   const [state, setState] = useState<RunState | null>(null)
   const [graph, setGraph] = useState<PipelineGraph | null>(null)
   const [events, setEvents] = useState<RunEvent[]>([])
-  const [selected, setSelected] = useState<string | null>(null)
+  const [selected, setSelected] = useState<GraphSelection | null>(null)
   const [answer, setAnswer] = useState('')
   const [error, setError] = useState<string | null>(null)
   const seqRef = useRef(0)
@@ -21,6 +21,18 @@ export function Run({ project, runId }: { project: string; runId: string }) {
   // The ledger is the source of truth (I7): the socket tells us WHEN to re-read it.
   useEffect(() => {
     let alive = true
+    // Events arrive in bursts (a replay can be hundreds at once), so re-reading the
+    // ledger per event hammered the server — and on Windows that made its atomic
+    // write fail, which killed runs. Coalesce into at most one read per 400ms.
+    let pending: number | undefined
+    const refreshSoon = () => {
+      if (pending !== undefined) return
+      pending = window.setTimeout(() => {
+        pending = undefined
+        void refresh()
+      }, 400)
+    }
+
     // A just-started run is launched in the background, so the ledger may not exist
     // for a moment: a 404 here means "not yet", not an error worth showing.
     const refresh = () =>
@@ -55,7 +67,7 @@ export function Run({ project, runId }: { project: string; runId: string }) {
           const event = raw as RunEvent
           seqRef.current = Math.max(seqRef.current, event.seq)
           setEvents((prev) => [...prev.slice(-400), event])
-          if (event.type !== 'heartbeat') void refresh()
+          if (event.type !== 'heartbeat') refreshSoon()
         },
         () => {
           if (!alive || TERMINAL.has(statusRef.current)) return
@@ -70,6 +82,7 @@ export function Run({ project, runId }: { project: string; runId: string }) {
       alive = false
       socket?.close()
       window.clearTimeout(retry)
+      window.clearTimeout(pending)
       window.clearInterval(poll)
     }
   }, [runId])
@@ -215,7 +228,7 @@ export function Run({ project, runId }: { project: string; runId: string }) {
             {Object.entries(state?.steps ?? {}).map(([id, step]) => (
               <li
                 key={id}
-                className={selected && step.node !== selected ? 'dimmed' : ''}
+                className={selected && step.node !== selected.nodeId ? 'dimmed' : ''}
               >
                 <code>{id}</code>
                 <span className={`pill is-${step.status}`}>{step.status}</span>
@@ -239,7 +252,9 @@ export function Run({ project, runId }: { project: string; runId: string }) {
           <ul className="feed">
             {events
               // when a node is selected: its own events plus run-level ones
-              .filter((e) => !selected || !e.step_id || e.step_id.startsWith(selected))
+              .filter(
+                (e) => !selected || !e.step_id || e.step_id.startsWith(selected.nodeId),
+              )
               .slice(-120)
               .reverse()
               .map((e) => (

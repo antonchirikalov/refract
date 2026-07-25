@@ -43,7 +43,7 @@ from refract.registry import ArtifactRegistry
 from refract.runtime.base import AgentRuntime
 from refract.scheduler import node_dependencies, run_pipeline
 from refract.snapshot import build_snapshot
-from refract.state import Ledger
+from refract.state import Ledger, read_state
 from refract.templates_lib import find_template, list_templates
 
 if TYPE_CHECKING:  # pragma: no cover - typing only (fastapi is an extra)
@@ -650,9 +650,7 @@ def write_answer(run_dir: Path | str, step_id: str, answer: str) -> None:
 
 
 def ledger_step(run_dir: Path, step_id: str) -> StepState | None:
-    state = RunState.model_validate(
-        json.loads((run_dir / "state.json").read_text("utf-8"))
-    )
+    state = RunState.model_validate(read_state(run_dir))
     return state.steps.get(step_id)
 
 

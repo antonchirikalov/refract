@@ -1295,12 +1295,21 @@ async def run_pipeline(
                 nid = tasks.pop(task)
                 resolved[nid] = task.result()
             check_checkpoints()
-    except BaseException:
-        # never leak in-flight tasks; leave the run in a terminal failed state
+    except BaseException as exc:
+        # never leak in-flight tasks; leave the run in a terminal failed state.
+        # Record WHY: a run that died used to leave `failed` with no reason anywhere,
+        # which is the least debuggable outcome the engine can produce.
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        reason = f"{type(exc).__name__}: {exc}".strip().rstrip(":")
+        events.emit(
+            {
+                "type": "log",
+                "payload": {"level": "error", "message": f"run aborted — {reason}"},
+            }
+        )
         ledger.set_run_status(RunStatus.failed, finished_at=clock())
         events.emit(
             {

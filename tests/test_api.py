@@ -11,6 +11,7 @@ deterministically.
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from collections.abc import Callable
@@ -764,3 +765,71 @@ def test_graph_exposes_meta_node_internals(client: TestClient, tmp_path: Path) -
     # a winner_model binding stays a binding, not a fake provider
     sd_refine = nodes["sd_refine"]
     assert sd_refine["blocks"][0]["model"] == "@choose.winner_model"
+
+
+# --- inspector edits (SPEC §19.2.1) -------------------------------------------
+
+
+def test_patch_node_sets_a_model_and_keeps_the_file_valid(client: TestClient) -> None:
+    before = client.get("/api/projects/demo-project/pipelines/demo").json()
+
+    resp = client.patch(
+        f"/api/projects/demo-project/pipelines/demo/nodes/write?base_hash={before['hash']}",
+        json={"model": "kimi/kimi-k3"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["committed"] is True
+    graph = client.get("/api/projects/demo-project/pipelines/demo/graph").json()
+    write = next(n for n in graph["nodes"] if n["id"] == "write")
+    assert write["models"] == ["kimi/kimi-k3"]
+    # the response's hash is what the client should send next
+    after = client.get("/api/projects/demo-project/pipelines/demo").json()
+    assert after["hash"] == resp.json()["hash"]
+
+
+def test_patch_node_refuses_an_edit_that_breaks_validation(client: TestClient) -> None:
+    resp = client.patch(
+        "/api/projects/demo-project/pipelines/demo/nodes/write",
+        json={"model": "nosuchprovider/x"},
+    )
+
+    assert resp.status_code == 409
+    codes = {e["code"] for e in resp.json()["detail"]["errors"]}
+    assert "E_PROVIDER_UNAVAILABLE" in codes
+    # and nothing was written
+    graph = client.get("/api/projects/demo-project/pipelines/demo/graph").json()
+    write = next(n for n in graph["nodes"] if n["id"] == "write")
+    assert write["models"] != ["nosuchprovider/x"]
+
+
+def test_patch_node_rejects_unknown_node_and_bad_params(client: TestClient) -> None:
+    assert (
+        client.patch(
+            "/api/projects/demo-project/pipelines/demo/nodes/nope",
+            json={"model": "kimi/kimi-k3"},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.patch(
+            "/api/projects/demo-project/pipelines/demo/nodes/write",
+            json={"params": {"max_rounds": 3}},  # not an agent-node param
+        ).status_code
+        == 422
+    )
+
+
+def test_patch_node_refuses_while_a_run_is_active(
+    client: TestClient, tmp_path: Path
+) -> None:
+    lock_dir = tmp_path / "projects" / "demo-project" / "runs" / "run_live"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / ".active.lock").write_text(str(os.getpid()), encoding="utf-8")
+
+    resp = client.patch(
+        "/api/projects/demo-project/pipelines/demo/nodes/write",
+        json={"model": "kimi/kimi-k3"},
+    )
+
+    assert resp.status_code == 409

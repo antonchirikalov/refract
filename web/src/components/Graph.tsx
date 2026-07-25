@@ -133,13 +133,18 @@ function labelPoint(from: Placed, to: Placed, index: number) {
   return { x: (from.x + to.x) / 2 + NODE_W / 2, y: y1 + (y2 - y1) * t }
 }
 
+export interface GraphSelection {
+  nodeId: string
+  block?: 'body' | 'critic' | 'selector'
+}
+
 interface Props {
   graph: PipelineGraph
   statuses?: Record<string, NodeStatus>
   /** Ledger steps, so a container can show which round is running (I7). */
   steps?: Record<string, StepState>
-  onSelect?: (nodeId: string) => void
-  selected?: string | null
+  onSelect?: (selection: GraphSelection) => void
+  selected?: GraphSelection | null
 }
 
 /** The last step of one inner block, e.g. `refine.body:r2` → round "r2". */
@@ -175,7 +180,7 @@ export function Graph({ graph, statuses, steps, onSelect, selected }: Props) {
   const [hovered, setHovered] = useState<string | null>(null)
   const { placed, width, height } = useMemo(() => layout(graph), [graph])
   const byId = new Map(graph.nodes.map((n) => [n.id, n]))
-  const active = selected ?? hovered
+  const active = selected?.nodeId ?? hovered
 
   return (
     <div className="graph-canvas">
@@ -227,7 +232,7 @@ export function Graph({ graph, statuses, steps, onSelect, selected }: Props) {
               pos={pos}
               status={statuses?.[pos.id]}
               steps={steps}
-              selected={selected === pos.id}
+              selected={selected?.nodeId === pos.id ? selected : null}
               onSelect={onSelect}
               onHover={setHovered}
             />
@@ -235,6 +240,45 @@ export function Graph({ graph, statuses, steps, onSelect, selected }: Props) {
         })}
       </div>
     </div>
+  )
+}
+
+/** The two arrows that make a loop a loop: down to the critic, back up to the body.
+ *
+ * Drawn in the container's left gutter and sized to the blocks it spans, so the cycle
+ * is visible as a cycle rather than implied by two stacked cards.
+ */
+function CycleArrows({ blocks }: { blocks: number }) {
+  const first = BLOCK_H / 2 // centre of the body row
+  const last = (blocks - 0.5) * BLOCK_H // centre of the last row
+  const height = blocks * BLOCK_H + 6
+  return (
+    <svg className="gcycle" width="24" height={height} aria-hidden="true">
+      <defs>
+        <marker
+          id="cycle-arrow"
+          viewBox="0 0 8 8"
+          refX="7"
+          refY="4"
+          markerWidth="5.5"
+          markerHeight="5.5"
+          orient="auto-start-reverse"
+        >
+          <path d="M 0 0 L 8 4 L 0 8 z" />
+        </marker>
+      </defs>
+      {/* forward: body → critic */}
+      <path
+        d={`M 16 ${first} C 22 ${first}, 22 ${last}, 17 ${last}`}
+        markerEnd="url(#cycle-arrow)"
+      />
+      {/* back: critic → body (this is the revise round) */}
+      <path
+        className="is-back"
+        d={`M 11 ${last} C 2 ${last}, 2 ${first}, 10 ${first}`}
+        markerEnd="url(#cycle-arrow)"
+      />
+    </svg>
   )
 }
 
@@ -251,8 +295,8 @@ function NodeCard({
   pos: Placed
   status?: NodeStatus
   steps?: Record<string, StepState>
-  selected: boolean
-  onSelect?: (id: string) => void
+  selected: GraphSelection | null
+  onSelect?: (selection: GraphSelection) => void
   onHover: (id: string | null) => void
 }) {
   const kind = node.type.startsWith('builtin/')
@@ -270,12 +314,12 @@ function NodeCard({
         'gnode',
         blocks.length ? 'is-container' : '',
         status ? `is-${status}` : '',
-        selected ? 'is-selected' : '',
+        selected && !selected.block ? 'is-selected' : '',
       ]
         .filter(Boolean)
         .join(' ')}
       style={{ left: pos.x, top: pos.y, width: pos.w, height: pos.h }}
-      onClick={() => onSelect?.(node.id)}
+      onClick={() => onSelect?.({ nodeId: node.id })}
       onMouseEnter={() => onHover(node.id)}
       onMouseLeave={() => onHover(null)}
     >
@@ -298,13 +342,33 @@ function NodeCard({
       <span className="gnode-id">{node.id}</span>
 
       {blocks.length ? (
-        <span className="gnode-blocks">
+        <span className={`gnode-blocks${node.type === 'loop' ? ' is-cycle' : ''}`}>
+          {node.type === 'loop' ? <CycleArrows blocks={blocks.length} /> : null}
           {blocks.map((block) => {
             const step = blockStep(steps, node.id, block.role)
+            const isSelected = selected?.block === block.role
             return (
               <span
-                className={`gblock${step ? ` is-${step.status}` : ''}`}
+                role="button"
+                tabIndex={0}
+                className={[
+                  'gblock',
+                  step ? `is-${step.status}` : '',
+                  isSelected ? 'is-selected' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
                 key={block.role}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onSelect?.({ nodeId: node.id, block: block.role })
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.stopPropagation()
+                    onSelect?.({ nodeId: node.id, block: block.role })
+                  }
+                }}
               >
                 <span className="gblock-role">{block.role}</span>
                 <span className="gblock-agent">{block.agent.split('@')[0]}</span>

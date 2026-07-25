@@ -962,3 +962,131 @@ textarea {
   border-color: color-mix(in srgb, var(--wait) 35%, var(--line));
   background: var(--wait-soft);
 }
+
+/* --- workbench: graph beside its inspector -------------------------------- */
+
+.workbench {
+  display: grid;
+  gap: var(--s4);
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+
+.workbench.is-open {
+  grid-template-columns: minmax(0, 1fr) 336px;
+}
+
+@media (max-width: 1000px) {
+  .workbench.is-open {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.workbench-hint {
+  font-size: 0.85rem;
+  align-self: center;
+}
+
+.inspector {
+  border: 1px solid var(--line);
+  border-radius: var(--r2);
+  background: var(--panel);
+  box-shadow: var(--shadow-2);
+  padding: var(--s4);
+  position: sticky;
+  top: 76px;
+}
+
+.inspector header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+
+.inspector header button {
+  padding: 0 var(--s2);
+  color: var(--muted);
+}
+
+.inspector-kind {
+  display: block;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--muted);
+}
+
+.inspector h3 {
+  font-size: 1.08rem;
+}
+
+.inspector .field {
+  max-width: none;
+  margin: var(--s3) 0;
+}
+
+.inspector-facts {
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line-soft);
+}
+
+.inspector-facts .inline {
+  margin-top: var(--s1);
+}
+
+.inspector-facts .inline > li {
+  font-size: 0.78rem;
+}
+
+/* --- loop cycle arrows inside a container --------------------------------- */
+
+.gnode-blocks {
+  position: relative;
+}
+
+.gnode-blocks.is-cycle {
+  padding-left: 28px;
+}
+
+.gcycle {
+  position: absolute;
+  left: 0;
+  top: 4px;
+  overflow: visible;
+}
+
+.gcycle path {
+  fill: none;
+  stroke: color-mix(in srgb, var(--accent) 70%, transparent);
+  stroke-width: 1.5;
+}
+
+.gcycle path.is-back {
+  stroke: color-mix(in srgb, var(--wait) 75%, transparent);
+  stroke-dasharray: 3 2;
+}
+
+.gcycle marker path {
+  stroke: none;
+}
+
+.gcycle marker path {
+  fill: color-mix(in srgb, var(--accent) 55%, transparent);
+  stroke: none;
+}
+
+.gblock {
+  cursor: pointer;
+}
+
+.gblock:hover {
+  border-color: color-mix(in srgb, var(--ink) 25%, var(--line));
+}
+
+.gblock.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}

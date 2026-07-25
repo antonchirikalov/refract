@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { api, ApiError } from '../api'
-import { Graph } from '../components/Graph'
+import { Graph, type GraphSelection } from '../components/Graph'
+import { Inspector } from '../components/Inspector'
 import { href, navigate } from '../route'
 import type {
   InputSummary,
   PipelineGraph,
+  ProviderInfo,
   RunSummary,
   ValidationError,
 } from '../types'
@@ -18,7 +20,8 @@ export function Project({ project }: { project: string }) {
   const [input, setInput] = useState<InputSummary | null>(null)
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [errors, setErrors] = useState<ValidationError[] | null>(null)
-  const [selected, setSelected] = useState<string | null>(null)
+  const [selected, setSelected] = useState<GraphSelection | null>(null)
+  const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [brief, setBrief] = useState('')
@@ -37,11 +40,11 @@ export function Project({ project }: { project: string }) {
 
   useEffect(() => {
     void reload().catch((e) => setError(String(e)))
+    void api.models().then(setProviders).catch(() => setProviders([]))
   }, [reload])
 
-  useEffect(() => {
+  const loadGraph = useCallback(() => {
     if (!pipeline) return
-    setGraph(null)
     void api
       .pipelineGraph(project, pipeline)
       .then(setGraph)
@@ -51,6 +54,11 @@ export function Project({ project }: { project: string }) {
       .then((r) => setErrors(r.errors))
       .catch(() => setErrors(null))
   }, [project, pipeline])
+
+  useEffect(() => {
+    setGraph(null)
+    loadGraph()
+  }, [loadGraph])
 
   async function start() {
     if (!pipeline) return
@@ -182,8 +190,25 @@ export function Project({ project }: { project: string }) {
               stops for review after: {(graph.checkpoints ?? []).join(', ')}
             </p>
           ) : null}
-          <Graph graph={graph} onSelect={setSelected} selected={selected} />
-          {selected ? <NodeDetail graph={graph} nodeId={selected} /> : null}
+          <div className={`workbench${selected ? ' is-open' : ''}`}>
+            <Graph graph={graph} onSelect={setSelected} selected={selected} />
+            {selected ? (
+              <Inspector
+                project={project}
+                pipeline={pipeline ?? ''}
+                graph={graph}
+                selection={selected}
+                providers={providers}
+                onClose={() => setSelected(null)}
+                onChanged={loadGraph}
+              />
+            ) : (
+              <p className="muted workbench-hint">
+                Click a node — or an agent inside a loop — to see and change its
+                properties.
+              </p>
+            )}
+          </div>
         </>
       ) : (
         <p className="muted">loading…</p>
@@ -211,32 +236,5 @@ export function Project({ project }: { project: string }) {
         </ul>
       )}
     </section>
-  )
-}
-
-function NodeDetail({
-  graph,
-  nodeId,
-}: {
-  graph: PipelineGraph
-  nodeId: string
-}) {
-  const node = graph.nodes.find((n) => n.id === nodeId)
-  if (!node) return null
-  const incoming = graph.edges.filter((e) => e.target === nodeId)
-  return (
-    <div className="panel">
-      <h3>
-        {node.id} <span className="muted">{node.type}</span>
-      </h3>
-      {node.agents.length ? <p>agents: {node.agents.join(', ')}</p> : null}
-      {node.needs.length ? <p className="meta">needs: {node.needs.join(', ')}</p> : null}
-      {node.fan_out ? <p className="meta">fan-out: {node.fan_out}</p> : null}
-      {incoming.length ? (
-        <p className="meta">
-          inputs: {incoming.map((e) => `${e.source}.${e.port}`).join(', ')}
-        </p>
-      ) : null}
-    </div>
   )
 }

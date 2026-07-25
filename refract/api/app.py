@@ -17,13 +17,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import shutil
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from fastapi import (
@@ -35,7 +36,8 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
 
 from refract.cli import (
     ActiveRunConflict,
@@ -62,8 +64,9 @@ from refract.models.pipeline import (
     Node,
     SelectNode,
 )
+from refract.patch import apply_node_patch
 from refract.registry import ArtifactRegistry
-from refract.state import step_workdir
+from refract.state import read_state, step_workdir
 from refract.templates_lib import (
     TEMPLATES_SUBDIR,
     find_template,
@@ -75,6 +78,8 @@ from refract.templates_lib import (
 # waiting_human is "paused for an answer", not truly finished, but no events come
 # until a resume, so the events socket closes on it too.
 _TERMINAL = {"completed", "failed", "cancelled", "waiting_human"}
+
+_log = logging.getLogger("refract.api")
 
 
 # --- request / response models ----------------------------------------------
@@ -110,6 +115,17 @@ class InputSummary(BaseModel):
     input_dir: str
     external: bool  # True when input points outside the project (referenced folder)
     entries: list[str]
+
+
+class NodePatch(BaseModel):
+    """A scoped node edit from the UI inspector (SPEC §19.2.1)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str | None = None
+    unset_model: bool = False  # explicit, since `model: null` cannot say "remove"
+    block: Literal["body", "critic", "selector"] | None = None
+    params: dict[str, Any] | None = None
 
 
 class SaveTemplateRequest(BaseModel):
@@ -475,9 +491,7 @@ def create_app(
             if runs_dir.is_dir()
             else []
         ):
-            state = RunState.model_validate_json(
-                (candidate / "state.json").read_text("utf-8")
-            )
+            state = RunState.model_validate(read_state(candidate))
             out.append(
                 RunSummary(
                     run_id=state.run_id,
@@ -661,6 +675,69 @@ def create_app(
             warnings=warnings,
         )
 
+    @api.patch("/api/projects/{project_id}/pipelines/{name}/nodes/{node_id}")
+    def patch_node(
+        project_id: str,
+        name: str,
+        node_id: str,
+        patch: NodePatch,
+        base_hash: str | None = Query(None),
+    ) -> PipelineWriteResponse:
+        """Set a node's model or params, keeping the file's comments (SPEC §19.2.1).
+
+        Deliberately narrow: the general patch vocabulary was rejected (§19.2), but
+        the inspector needs exactly two things — which model runs a node and how many
+        rounds a loop takes. Applied to a round-trip document, validated in full, and
+        committed only if the result is valid.
+        """
+        pdir = _project_dir(project_id)
+        active = _active_run(pdir / "runs")
+        if active is not None:
+            raise HTTPException(
+                status_code=409, detail=f"project has an active run ({active})"
+            )
+        path = pdir / "pipelines" / f"{name}.yaml"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=f"no pipeline {name!r}")
+        current = path.read_text("utf-8")
+        if base_hash is not None and _text_hash(current) != base_hash:
+            raise HTTPException(
+                status_code=409,
+                detail="stale base_hash: the pipeline changed since you read it",
+            )
+        try:
+            updated = apply_node_patch(
+                current,
+                node_id=node_id,
+                model=patch.model,
+                unset_model=patch.unset_model,
+                block=patch.block,
+                params=patch.params,
+            )
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except (ValueError, PydanticValidationError) as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+        errors, warnings = _validate_text(pdir, name, updated)
+        if errors:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "not written: the edit makes the pipeline invalid",
+                    "errors": [e.model_dump() for e in errors],
+                    "warnings": [w.model_dump() for w in warnings],
+                },
+            )
+        _atomic_write(path, updated)
+        return PipelineWriteResponse(
+            name=name,
+            committed=True,
+            hash=_text_hash(updated),
+            errors=errors,
+            warnings=warnings,
+        )
+
     @api.get("/api/catalog")
     def get_catalog() -> dict[str, Any]:
         """The authoring catalog: what a pipeline can be built from (SPEC §19.1)."""
@@ -819,9 +896,7 @@ def create_app(
     @api.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> RunState:
         run_dir = _find_run_dir(run_id)
-        return RunState.model_validate(
-            json.loads((run_dir / "state.json").read_text("utf-8"))
-        )
+        return RunState.model_validate(read_state(run_dir))
 
     @api.get("/api/runs/{run_id}/steps/{step_id}/artifacts")
     def list_artifacts(run_id: str, step_id: str) -> list[str]:
@@ -894,14 +969,19 @@ def create_app(
                 if attempt == 19:
                     rec.status = "failed"
                     rec.error = "run is still locked by another executor"
+                    _log.warning("resume of %s gave up: still locked", run_dir.name)
                     return
                 await asyncio.sleep(0.25)
             except asyncio.CancelledError:
                 rec.status = "cancelled"
+                _log.warning("resume of %s was cancelled", run_dir.name)
                 raise
             except Exception as e:  # noqa: BLE001 — surfaced as run status
                 rec.status = "failed"
                 rec.error = str(e)
+                # without this the only trace of a failed resume was an in-memory
+                # field no client ever reads
+                _log.exception("resume of %s failed", run_dir.name)
                 return
 
     def _guard_not_executing(run_id: str) -> None:

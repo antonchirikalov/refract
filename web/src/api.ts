@@ -74,6 +74,24 @@ export const api = {
       `/api/projects/${project}/pipelines/${name}`,
     ),
 
+  patchNode: (
+    project: string,
+    pipeline: string,
+    nodeId: string,
+    patch: {
+      model?: string
+      unset_model?: boolean
+      block?: 'body' | 'critic' | 'selector'
+      params?: Record<string, number | string | boolean>
+    },
+    baseHash?: string,
+  ) =>
+    request<{ name: string; committed: boolean; hash: string }>(
+      `/api/projects/${project}/pipelines/${pipeline}/nodes/${nodeId}` +
+        (baseHash ? `?base_hash=${baseHash}` : ''),
+      { method: 'PATCH', body: JSON.stringify(patch) },
+    ),
+
   validate: (project: string, name: string) =>
     request<{ ok: boolean; errors: ValidationError[] }>(
       `/api/projects/${project}/pipelines/${name}/validate`,

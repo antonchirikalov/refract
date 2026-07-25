@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from refract.models.ledger import NodeStatus, RunStatus, StepOutcome, StepStatus
-from refract.state import STATE_FILENAME, Ledger, step_workdir
+from refract.state import STATE_FILENAME, Ledger, read_state, step_workdir
 
 
 def _make_ledger(run_dir: Path) -> Ledger:
@@ -240,3 +242,51 @@ class TestStepWorkdir:
             step_workdir(tmp_path, "choose.selector")
             == tmp_path / "steps" / "choose" / "selector"
         )
+
+
+class TestConcurrentReaders:
+    """A reader must not be able to break a run (Windows atomic-replace sharing)."""
+
+    def test_save_survives_a_reader_holding_the_file(self, tmp_path: Path) -> None:
+        # Found live: a UI polling state.json made os.replace raise PermissionError
+        # inside the scheduler, which aborted the whole run with a node stuck at
+        # `running`. The write now retries instead of exploding.
+        import threading
+
+        ledger = Ledger.create(
+            tmp_path,
+            run_id="r",
+            pipeline="p",
+            node_ids=["a"],
+            created_at="T0",
+        )
+        stop = threading.Event()
+
+        def reader() -> None:
+            while not stop.is_set():
+                try:
+                    read_state(tmp_path)
+                except RuntimeError:
+                    pass
+
+        t = threading.Thread(target=reader)
+        t.start()
+        try:
+            for i in range(200):
+                ledger.set_node_status(
+                    "a", NodeStatus.running if i % 2 else NodeStatus.done
+                )
+        finally:
+            stop.set()
+            t.join()
+
+        assert read_state(tmp_path)["run_id"] == "r"
+
+    def test_read_state_tolerates_a_torn_read(self, tmp_path: Path) -> None:
+        Ledger.create(
+            tmp_path, run_id="r", pipeline="p", node_ids=["a"], created_at="T0"
+        )
+        (tmp_path / STATE_FILENAME).write_text("", encoding="utf-8")  # mid-write shape
+
+        with pytest.raises(RuntimeError, match="could not read"):
+            read_state(tmp_path)

@@ -15,12 +15,13 @@ import json
 from pathlib import Path
 
 from refract.artifacts import link_or_copy
+from refract.state import read_state
 from refract.models.ledger import RunState
 
 
 def load_run_state(run_dir: Path) -> RunState:
     """Read a prior run's ``state.json`` verbatim (no crash recovery)."""
-    raw = json.loads((Path(run_dir) / "state.json").read_text("utf-8"))
+    raw = read_state(run_dir)
     return RunState.model_validate(raw)
 
 
