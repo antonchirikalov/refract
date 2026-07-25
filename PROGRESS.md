@@ -5,10 +5,12 @@ closes an item. Phase table from SPEC §17.
 
 ## Current phase
 
-**Phase 4 in progress.** Phases 0–3 done and live-validated on real opencode (see below).
-Landed in phase 4: the authoring catalog (§19.1) and safe pipeline write (§19.2).
-Next: the UI spec (projects + template library, storage layout) — patch operations were
-considered and rejected, see the §19.2 CHANGED note.
+**Phase 5 in progress.** Phases 0–3 done and live-validated on real opencode (see below).
+Phase 4 landed: authoring catalog (§19.1) + safe pipeline write (§19.2); patch operations
+were considered and rejected (§19.2 CHANGED). Phase 5 landed the `discover` node (§20) —
+the research archetype: a brief instead of a documents folder, sources found on the
+network. Next: the UI itself (React SPA over the API; SPEC-UI.md) — v0.1 shows templates
+and progress, pipeline editing is deferred.
 
 ## Live Extract validation (2026-07-25)
 
@@ -55,6 +57,7 @@ returns `403` with a billing message (that one surfaces correctly as
 | 1 | metanodes (loop/select), map_over.models, winner_model binding, rerun/reuse + `refract rerun` **done** (test_loop/test_select/test_map_over/test_reuse green, spec-audited); 3 library templates, OpencodeRuntime execution (serve-per-step, I1/heartbeats/auto-approve/kill) + docs/opencode-smoke.md **done** (verified vs real opencode 1.18.4 to the LLM boundary); spectra agents migrated (arch_probe→tavily-remote, arch_critic, illustrator→mcp:paperbanana, confluence_publisher→mcp-atlassian) **done** (effort_estimator + word_form_builder dropped per user; illustrator uses a paperbanana MCP wrapper — separate project, see docs/illustrator-paperbanana-mcp.md; no engine change needed). Phase 1 engine + content complete; live-LLM smoke run PASSED (demo pipeline on real opencode 1.18.4 + openai: completed, gate-retry recovered a bad output, I8 secrets clean, no leaked processes) | done |
 | 2 | REST/WS API (§15): projects/pipelines/validate/runs/artifacts/cancel/resume/models/fs + WS events **done**; `/answers` (HITL + capability approvals → background resume) landed with phase 3; frontend UI spec separate | done |
 | 3 | HITL (question@v1 → waiting_human → `refract answer` / API answers → resume) **done** for plain agent nodes (guarded inside map/loop); capability tiers (safe<moderate<dangerous) + confirmations **done** — a project `confirm` / `confirm_tier` policy parks a plain agent step at `waiting_human` before it runs, reusing the HITL answer machinery (`refract answer <run> <node> approve` → `confirm/approved.json` → resume). Confluence publisher left untouched per user | done |
+| 5 | `discover` node (§20): network source of `collection<source@v1>` — agent produces ONE dir, the ENGINE assembles the collection (I6 intact); `builtin/brief` + `brief@v1`/`found_sources@v1` types; `input_mode: documents\|brief` on the pipeline; `source_finder@1` agent + `research` template; reuse = ordinary agent step (fresh search is explicit, §20.3); slug/source_hash by the scanner's rules. **done** (test_discover + template e2e on MockRuntime; not yet run on live LLMs — no provider quota) | done |
 | 4 | authoring catalog (§19.1: agents/builtins/types/node kinds/constraints keyed by validator codes; `GET /api/catalog`, `refract catalog`) **done**; safe pipeline write (§19.2: validate-before-commit, atomic write, `base_hash` optimistic locking, `allow_invalid` drafts) **done**. Graph patch ops were specified and then **rejected before implementation** — see the §19.2 CHANGED note: full rewrite + verification covers the editor case at a fraction of the complexity. UI itself: separate spec, in design | in progress |
 
 ## Phase 0 — SPEC sections checklist

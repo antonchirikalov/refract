@@ -23,13 +23,15 @@ from pathlib import Path
 
 from refract.artifacts import artifact_path, link_or_copy
 from refract.builtins import BUILTINS
+from refract.builtins.scanner import source_hash as source_content_hash
 from refract.events import EventWriter, utcnow_iso
-from refract.graph import BindingRef, DataRef, parse_ref
+from refract.graph import DISCOVER_OUT_PORT, BindingRef, DataRef, parse_ref
 from refract.models.agent import AgentSpec
 from refract.models.ledger import NodeStatus, RunStatus, StepOutcome, StepStatus
 from refract.models.pipeline import (
     AgentNode,
     BuiltinNode,
+    DiscoverNode,
     LoopNode,
     Node,
     Pipeline,
@@ -42,7 +44,14 @@ from refract.models.types import (
     CollectionStatus,
     ItemInfo,
 )
-from refract.registry import ArtifactRegistry, ResolvedType, make_collection, model_slug
+from refract.registry import (
+    ArtifactRegistry,
+    ResolvedType,
+    make_collection,
+    model_slug,
+    slugify,
+    unique_slug,
+)
 from refract.runtime.base import AgentRuntime
 from refract import reuse
 from refract.metanodes import MetaContext, run_loop, run_select
@@ -94,6 +103,10 @@ def node_dependencies(pipeline: Pipeline) -> dict[str, set[str]]:
                 add(node.id, ref_s)
             add_binding(node.id, node.body.model)
             add_binding(node.id, node.critic.model)
+        elif isinstance(node, DiscoverNode):
+            for ref_s in node.inputs.values():
+                add(node.id, ref_s)
+            add_binding(node.id, node.params.model)
         elif isinstance(node, SelectNode):
             add(node.id, node.candidates)
             add_binding(node.id, node.selector.model)
@@ -106,10 +119,11 @@ def node_dependencies(pipeline: Pipeline) -> dict[str, set[str]]:
 def _node_output_base(run_dir: Path, node: Node) -> Path:
     """Directory that holds a producer node's port outputs (SPEC §9/§10.3).
 
-    Plain agent/builtin nodes write to ``steps/<id>/main/output/``; map, loop and
-    select nodes assemble their outputs under ``steps/<id>/_out/`` (SPEC §10.3).
+    Plain agent/builtin nodes write to ``steps/<id>/main/output/``; map, loop,
+    select and discover nodes assemble their outputs under ``steps/<id>/_out/``
+    (SPEC §10.3, §20.2).
     """
-    if isinstance(node, LoopNode | SelectNode):
+    if isinstance(node, LoopNode | SelectNode | DiscoverNode):
         return run_dir / "steps" / node.id / "_out"
     if isinstance(node, AgentNode) and (
         node.map is not None or node.map_over is not None
@@ -207,6 +221,97 @@ def _agent_plan(
         gate_retries=node.params.gate_retries,
         infra_retries=node.params.infra_retries,
     )
+
+
+def _discover_plan(
+    node: DiscoverNode,
+    *,
+    run_dir: Path,
+    agents: dict[str, AgentSpec],
+    registry: ArtifactRegistry,
+    nodes: dict[str, Node],
+    ledger: Ledger,
+) -> AgentStepPlan:
+    """Step plan for a discover node — an ordinary agent step (SPEC §20.2)."""
+    agent = agents[node.agent]
+    if node.params.model is None:
+        raise ValueError(f"node {node.id!r} has no resolved model")
+    return AgentStepPlan(
+        step_id=node.id,
+        node_id=node.id,
+        workdir=run_dir / "steps" / node.id / "main",
+        agent=agent,
+        agent_dir=run_dir / "snapshot" / "agents" / node.agent,
+        model=resolve_model(node.params.model, ledger),
+        registry=registry,
+        inputs=resolve_data_inputs(
+            agent,
+            node.inputs,
+            run_dir=run_dir,
+            registry=registry,
+            nodes=nodes,
+            where=node.id,
+        ),
+        timeout_s=node.params.timeout_s or agent.defaults.timeout_s,
+        gate_retries=node.params.gate_retries,
+        infra_retries=node.params.infra_retries,
+    )
+
+
+def assemble_discovered_collection(
+    found_dir: Path, out_dir: Path
+) -> CollectionManifest:
+    """Turn a discover agent's output dir into ``collection<source@v1>`` (§20.2).
+
+    One element per top-level entry, ``slug``/``source_hash`` by the scanner's rules
+    (§13) so both collection producers hash identically. ``_index.json`` (the agent's
+    optional url/title map) is not a source — it is copied next to the manifest.
+    Idempotent: the output dir is rebuilt from scratch, so resume re-assembly is safe.
+    """
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    items: list[CollectionItem] = []
+    taken: set[str] = set()
+    ok = 0
+    entries = sorted(found_dir.iterdir()) if found_dir.is_dir() else []
+    for entry in entries:
+        if entry.name.startswith(".") or entry.name == "_index.json":
+            continue
+        slug = unique_slug(slugify(entry.name), taken)
+        taken.add(slug)
+        slug_dir = out_dir / slug
+        slug_dir.mkdir(parents=True, exist_ok=True)
+        if entry.is_dir():
+            shutil.copytree(entry, slug_dir, dirs_exist_ok=True)
+        else:
+            shutil.copyfile(entry, slug_dir / entry.name)
+        items.append(
+            CollectionItem(
+                slug=slug,
+                source=entry.name,
+                source_hash=source_content_hash(entry),
+                status=CollectionStatus.ok,
+                path=f"{slug}/",
+            )
+        )
+        ok += 1
+
+    index = found_dir / "_index.json"
+    if index.is_file():
+        shutil.copyfile(index, out_dir / "_index.json")
+
+    manifest = CollectionManifest(
+        type=make_collection("source@v1"),
+        items=items,
+        stats=CollectionStats(total=len(items), ok=ok, failed=0),
+    )
+    (out_dir / "_collection.json").write_text(
+        json.dumps(manifest.model_dump(mode="json"), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return manifest
 
 
 def _provider_of(model: str) -> str:
@@ -470,7 +575,7 @@ async def run_pipeline(
     # builtins, and loop/select meta-nodes.
     for nid, node in nodes.items():
         supported_agent = isinstance(node, AgentNode)
-        supported_meta = isinstance(node, LoopNode | SelectNode)
+        supported_meta = isinstance(node, LoopNode | SelectNode | DiscoverNode)
         supported_builtin = (
             isinstance(node, BuiltinNode)
             and BUILTINS.get(node.builtin_name) is not None
@@ -885,6 +990,9 @@ async def run_pipeline(
         if isinstance(node, SelectNode):
             _guard_confirm_unsupported(node, [node.selector.agent], "select")
             return await run_select(node, meta_ctx)
+        if isinstance(node, DiscoverNode):
+            _guard_confirm_unsupported(node, [node.agent], "discover")
+            return await run_discover_node(node)
         assert isinstance(node, AgentNode)  # guaranteed by the up-front check
         if node.map is not None:
             _guard_confirm_unsupported(node, [node.agent], "map")
@@ -916,6 +1024,54 @@ async def run_pipeline(
             else:
                 changed_nodes.add(node_id)
         return status
+
+    async def run_discover_node(node: DiscoverNode) -> NodeStatus:
+        """Run the discover agent, then assemble its dir into a collection (§20.2).
+
+        The step itself is the ordinary agent lifecycle (§10.2) — gate, retries,
+        trace. Only the assembly afterwards is special, and it is the engine's work,
+        which is what keeps I6 intact: the agent produced one directory, not a
+        collection.
+        """
+        plan = _discover_plan(
+            node,
+            run_dir=run_dir,
+            agents=agents,
+            registry=registry,
+            nodes=nodes,
+            ledger=ledger,
+        )
+        async with semaphore_for(plan.model):
+            set_node(node.id, NodeStatus.running)
+            step = await execute_agent_step(
+                plan,
+                runtime,
+                ledger,
+                on_event=emit_event,
+                clock=clock,
+                sleeper=sleeper,
+            )
+        if step.status is StepStatus.waiting_human:
+            set_node(node.id, NodeStatus.waiting_human)
+            return NodeStatus.waiting_human
+        if step.outcome is not StepOutcome.ok:
+            set_node(node.id, NodeStatus.failed, error=step.error)
+            return NodeStatus.failed
+
+        primary = [p for p in agents[node.agent].produces if not p.optional][0]
+        manifest = assemble_discovered_collection(
+            plan.workdir / "output" / primary.port,
+            run_dir / "steps" / node.id / "_out" / DISCOVER_OUT_PORT,
+        )
+        if manifest.stats.ok < node.params.min_sources:
+            error = (
+                f"no sources discovered: {manifest.stats.ok} < "
+                f"min_sources={node.params.min_sources}"
+            )
+            set_node(node.id, NodeStatus.failed, error=error)
+            return NodeStatus.failed
+        set_node(node.id, NodeStatus.done)
+        return NodeStatus.done
 
     async def _run_plain_agent(node: AgentNode) -> NodeStatus:
         # Capability confirmation (SPEC §7/§16.9): pause for a human to approve

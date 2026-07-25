@@ -54,8 +54,12 @@ def _file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _source_hash(path: Path) -> str:
-    """Content hash of one source element (file or folder), SPEC §13."""
+def source_hash(path: Path) -> str:
+    """Content hash of one source element (file or folder), SPEC §13.
+
+    Public because ``discover`` (SPEC §20.2) assembles its collection with exactly
+    these rules — one hashing scheme for both collection producers.
+    """
     if path.is_dir():
         lines = sorted(
             f"{p.relative_to(path).as_posix()}:{_file_sha256(p)}"
@@ -97,7 +101,7 @@ def run(
         taken.add(slug)
         slug_dir = collection_dir / slug
         try:
-            source_hash = _source_hash(entry)
+            item_hash = source_hash(entry)
             if entry.is_dir():
                 shutil.copytree(entry, slug_dir)
             else:
@@ -106,14 +110,14 @@ def run(
             status, error = CollectionStatus.ok, None
             ok += 1
         except OSError as exc:  # unreadable source: recorded, no payload
-            source_hash = "sha256:"
+            item_hash = "sha256:"
             status, error = CollectionStatus.failed, str(exc)
             failed += 1
         items.append(
             CollectionItem(
                 slug=slug,
                 source=entry.name,
-                source_hash=source_hash,
+                source_hash=item_hash,
                 status=status,
                 path=f"{slug}/",
                 error=error,

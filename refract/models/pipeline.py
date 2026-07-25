@@ -53,6 +53,14 @@ class SelectParams(RetryParams):
     cache: bool = False
 
 
+class DiscoverParams(RetryParams):
+    """Params for a discover node (SPEC §20.1)."""
+
+    min_sources: int = 1
+    model: str | None = None
+    cache: bool = False
+
+
 class SubBlockParams(BaseModel):
     """Optional param overrides on a sub-block (``body``/``critic``/``selector``)."""
 
@@ -141,6 +149,19 @@ class SelectNode(_NodeBase):
     params: SelectParams = Field(default_factory=SelectParams)
 
 
+class DiscoverNode(_NodeBase):
+    """``type: discover`` — network source of ``collection<source@v1>`` (SPEC §20).
+
+    Runs one agent step whose single ``dir`` output the engine then assembles into
+    the collection, so the agent never produces a collection itself (I6).
+    """
+
+    type: Literal["discover"]
+    agent: str
+    inputs: dict[str, str] = Field(default_factory=dict)
+    params: DiscoverParams = Field(default_factory=DiscoverParams)
+
+
 class BuiltinNode(_NodeBase):
     """A ``builtin/<name>`` node; ``params`` validated later by the builtin (§13)."""
 
@@ -162,7 +183,7 @@ class BuiltinNode(_NodeBase):
 def _node_discriminator(v: object) -> str | None:
     t = v.get("type") if isinstance(v, dict) else getattr(v, "type", None)
     if isinstance(t, str):
-        if t in ("agent", "loop", "select"):
+        if t in ("agent", "loop", "select", "discover"):
             return t
         if t.startswith("builtin/"):
             return "builtin"
@@ -174,6 +195,7 @@ Node = Annotated[
         Annotated[AgentNode, Tag("agent")],
         Annotated[LoopNode, Tag("loop")],
         Annotated[SelectNode, Tag("select")],
+        Annotated[DiscoverNode, Tag("discover")],
         Annotated[BuiltinNode, Tag("builtin")],
     ],
     Discriminator(_node_discriminator),
@@ -187,4 +209,9 @@ class Pipeline(BaseModel):
 
     version: str
     name: str
+    # What this pipeline expects in the project's input folder (SPEC §8, SPEC-UI §5):
+    # ``documents`` — source files to scan; ``brief`` — a single written brief/topic
+    # the UI collects as text instead of asking for a folder. Execution is identical
+    # (both are just files under input/); this only tells a client what to ask for.
+    input_mode: Literal["documents", "brief"] = "documents"
     nodes: list[Node]

@@ -13,6 +13,8 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
+from refract.builtins.brief import BriefParams
+from refract.builtins.brief import run as brief_run
 from refract.builtins.scanner import ScannerParams
 from refract.builtins.scanner import run as scanner_run
 from refract.models.agent import Port
@@ -33,6 +35,11 @@ class BuiltinDef:
 
 
 BUILTINS: dict[str, BuiltinDef] = {
+    "brief": BuiltinDef(
+        params_model=BriefParams,
+        produces=[Port(port="brief", type="brief@v1")],
+        run=brief_run,
+    ),
     "scanner": BuiltinDef(
         params_model=ScannerParams,
         produces=[Port(port="sources", type="collection<source@v1>")],
@@ -40,4 +47,4 @@ BUILTINS: dict[str, BuiltinDef] = {
     ),
 }
 
-__all__ = ["BUILTINS", "BuiltinDef", "ScannerParams"]
+__all__ = ["BUILTINS", "BriefParams", "BuiltinDef", "ScannerParams"]

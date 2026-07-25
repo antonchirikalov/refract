@@ -193,8 +193,11 @@ def check_port(output_dir: Path | str, spec: GatePort) -> PortGateResult:
         # dir/any: existence alone is too weak — an agent that produced nothing
         # would still pass (SPEC §10.2 > CHANGED). Require real content.
         if path.is_dir():
-            if not any(path.iterdir()):
-                problems.append("output directory is empty")
+            # dot-entries are tooling artifacts, not content (as in §13): an agent
+            # that wrote only a `.keep` produced nothing, and a discover agent that
+            # found nothing must not pass as ok (SPEC §10.2 > CHANGED, §20.2).
+            if not any(c for c in path.iterdir() if not c.name.startswith(".")):
+                problems.append("output directory has no content")
         elif path.stat().st_size == 0:
             problems.append("output file is empty")
 

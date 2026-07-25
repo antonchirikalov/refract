@@ -931,3 +931,97 @@ nodes:
         loaded = load_pipeline(p, ctx)
         assert loaded.ok is True
         assert Code.W_CACHE_UNSUPPORTED in _codes(loaded.errors)
+
+
+class TestEDiscoverShape:
+    """SPEC §20.1: a discover agent produces exactly one dir artifact."""
+
+    _AGENTS = {
+        "finder@1": agent_spec(
+            "finder",
+            consumes=[{"port": "brief", "type": "brief@v1"}],
+            produces=[{"port": "found", "type": "found_sources@v1"}],
+        ),
+        "flat_finder@1": agent_spec(
+            "flat_finder",
+            consumes=[{"port": "brief", "type": "brief@v1"}],
+            produces=[{"port": "found", "type": "requirements@v1"}],  # file, not dir
+        ),
+        "double_finder@1": agent_spec(
+            "double_finder",
+            consumes=[{"port": "brief", "type": "brief@v1"}],
+            produces=[
+                {"port": "found", "type": "found_sources@v1"},
+                {"port": "extra", "type": "requirements@v1"},
+            ],
+        ),
+        "processor@1": agent_spec(
+            "processor",
+            consumes=[{"port": "source", "type": "source@v1"}],
+            produces=[{"port": "extract", "type": "extract@v1"}],
+        ),
+    }
+
+    def _yaml(self, agent: str, *, with_map: bool = False) -> str:
+        text = f"""
+version: "0.1"
+name: p
+input_mode: brief
+nodes:
+  - id: brief
+    type: builtin/brief
+  - id: find
+    type: discover
+    agent: {agent}
+    inputs: {{ brief: brief.brief }}
+"""
+        if with_map:
+            text += """  - id: extract
+    type: agent
+    agent: processor@1
+    map: find.sources
+"""
+        return text
+
+    def test_dir_producing_agent_is_accepted(self, tmp_path: Path) -> None:
+        ctx = make_ctx(tmp_path, agents=self._AGENTS)
+        _order, errors = validate_pipeline(_pipeline(self._yaml("finder@1")), ctx)
+        assert Code.E_DISCOVER_SHAPE not in _codes(errors)
+
+    def test_non_dir_output_yields_e_discover_shape(self, tmp_path: Path) -> None:
+        ctx = make_ctx(tmp_path, agents=self._AGENTS)
+        _order, errors = validate_pipeline(_pipeline(self._yaml("flat_finder@1")), ctx)
+        assert Code.E_DISCOVER_SHAPE in _codes(errors)
+
+    def test_two_primary_ports_yields_e_discover_shape(self, tmp_path: Path) -> None:
+        ctx = make_ctx(tmp_path, agents=self._AGENTS)
+        _order, errors = validate_pipeline(
+            _pipeline(self._yaml("double_finder@1")), ctx
+        )
+        assert Code.E_DISCOVER_SHAPE in _codes(errors)
+
+    def test_unconnected_required_input_yields_e_input_missing(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = make_ctx(tmp_path, agents=self._AGENTS)
+        pipeline = _pipeline(
+            """
+version: "0.1"
+name: p
+nodes:
+  - id: find
+    type: discover
+    agent: finder@1
+"""
+        )
+        _order, errors = validate_pipeline(pipeline, ctx)
+        assert Code.E_INPUT_MISSING in _codes(errors)
+
+    def test_map_over_a_discover_collection_is_legal(self, tmp_path: Path) -> None:
+        # discover is a SOURCE node like scanner, so mapping its output is allowed —
+        # E_NESTED_MAP only bars collections produced by map/map_over (SPEC §20).
+        ctx = make_ctx(tmp_path, agents=self._AGENTS)
+        _order, errors = validate_pipeline(
+            _pipeline(self._yaml("finder@1", with_map=True)), ctx
+        )
+        assert _codes(errors) - {Code.W_SECURITY} == set()

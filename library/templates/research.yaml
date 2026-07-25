@@ -1,0 +1,35 @@
+version: "0.1"
+name: research
+
+# Research mode: you give a topic or question instead of documents. A discover node
+# searches the web and captures the sources itself (SPEC §20), then the usual chain
+# runs on them — one extraction per source, a writer that consolidates, a critic that
+# reviews until the document is fit to ship.
+input_mode: brief
+
+nodes:
+  - id: brief
+    type: builtin/brief
+
+  - id: find
+    type: discover
+    agent: source_finder@1
+    inputs: { brief: brief.brief }
+    params: { min_sources: 3 }
+
+  - id: extract
+    type: agent
+    agent: source_processor@1
+    map: find.sources
+    params: { workers: 3, min_ok: 1 }
+
+  - id: refine
+    type: loop
+    params: { max_rounds: 3 }
+    body:
+      agent: requirements_writer@1
+      inputs: { extracts: extract.extract }
+    critic:
+      agent: requirements_critic@1
+      inputs: { draft: "@body", extracts: extract.extract }
+    outputs: { doc: "@body" }

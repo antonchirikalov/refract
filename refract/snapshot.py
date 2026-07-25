@@ -27,6 +27,7 @@ from refract.models.agent import AgentSpec
 from refract.models.pipeline import (
     AgentNode,
     BuiltinNode,
+    DiscoverNode,
     LoopNode,
     Pipeline,
     SelectNode,
@@ -104,6 +105,8 @@ def used_agent_refs(pipeline: Pipeline) -> list[str]:
             add(node.critic.agent)
         elif isinstance(node, SelectNode):
             add(node.selector.agent)
+        elif isinstance(node, DiscoverNode):
+            add(node.agent)
     return refs
 
 
@@ -162,6 +165,15 @@ def build_resolved(
                 default_model=default_model,
             )
             _fill_retry_params(raw["params"], _agent_timeout(node.body.agent, agents))
+        elif isinstance(node, DiscoverNode):
+            # discover runs an agent step, so it needs an effective model too (§20.2)
+            raw["params"]["model"] = resolve_model(
+                node.id,
+                node.params.model,
+                overrides=overrides,
+                default_model=default_model,
+            )
+            _fill_retry_params(raw["params"], _agent_timeout(node.agent, agents))
         elif isinstance(node, SelectNode):
             raw["selector"]["model"] = resolve_model(
                 f"{node.id}.selector",

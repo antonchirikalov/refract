@@ -123,6 +123,7 @@ def template_metadata(
         "source": ref.source,
         "title": pipeline.name or ref.name,
         "description": header_comment(text),
+        "input_mode": pipeline.input_mode,
         "nodes": [{"id": n.id, "type": n.type} for n in pipeline.nodes],
         "agents": agent_refs,
         "needs": needs,

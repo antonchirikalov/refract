@@ -51,11 +51,13 @@ class TestCompleteness:
 
     def test_meta_node_kinds_carry_their_blocks_and_params(self) -> None:
         kinds = {k["kind"]: k for k in _catalog()["node_kinds"]}  # type: ignore[union-attr,index]
-        assert set(kinds) == {"agent", "loop", "select"}
+        assert set(kinds) == {"agent", "loop", "select", "discover"}
         assert kinds["loop"]["blocks"] == {"body": "agent", "critic": "agent"}
         assert "max_rounds" in kinds["loop"]["params_schema"]["properties"]
         assert kinds["select"]["required"] == ["candidates", "selector"]
         assert kinds["agent"]["fan_out"] == ["map", "map_over"]
+        # discover is the other legal collection producer (SPEC §20)
+        assert kinds["discover"]["outputs"] == ["sources"]
 
     def test_templates_are_listed(self) -> None:
         assert set(_catalog()["templates"]) >= {  # type: ignore[arg-type]

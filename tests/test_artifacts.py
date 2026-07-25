@@ -331,7 +331,23 @@ class TestGate:
         (output_dir / "bundle").mkdir(parents=True)  # empty port dir
         result = check_port(output_dir, GatePort(port="bundle", rtype=rtype))
         assert result.ok is False
-        assert any("empty" in p for p in result.problems)
+        assert any("no content" in p for p in result.problems)
+
+    def test_dir_kind_with_only_dot_entries_not_ok(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        # SPEC §10.2 (CHANGED 2026-07-25): dot-entries are tooling artifacts, not
+        # content — an agent that wrote only a .keep produced nothing.
+        rtype = registry.get("bundle@v1")
+        assert rtype is not None
+        output_dir = tmp_path / "output"
+        (output_dir / "bundle").mkdir(parents=True)
+        (output_dir / "bundle" / ".keep").write_text("", encoding="utf-8")
+
+        result = check_port(output_dir, GatePort(port="bundle", rtype=rtype))
+
+        assert result.ok is False
+        assert any("no content" in p for p in result.problems)
 
     def test_dir_kind_non_empty_ok(
         self, tmp_path: Path, registry: ArtifactRegistry

@@ -24,6 +24,8 @@ types:
     rules:
       - { rule: regex, pattern: "^# Requirements:", flags: "m" }
   design_doc@v1:    { kind: file, format: markdown }
+  brief@v1:         { kind: file, format: markdown }
+  found_sources@v1: { kind: dir }
 """
 
 

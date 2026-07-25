@@ -1,0 +1,15 @@
+name: source_finder
+version: 1
+description: >
+  Finds and captures source material for a research brief: searches the web,
+  reads what it finds, and saves each worthwhile source as its own file. The
+  agent of a `discover` node (SPEC §20) — it writes ONE directory and the engine
+  turns that directory into the source collection, so the agent never produces a
+  collection itself (I6).
+consumes:
+  - { port: brief, type: brief@v1 }
+produces:
+  - { port: found, type: found_sources@v1 }
+needs: [read, edit, webfetch, "mcp:tavily-remote"]
+defaults:
+  timeout_s: 1800

@@ -316,7 +316,10 @@ def test_catalog_endpoint_serves_the_authoring_catalog(client: TestClient) -> No
     assert resp.status_code == 200
     catalog = resp.json()
     assert {a["ref"] for a in catalog["agents"]} >= {"source_processor@1"}
-    assert catalog["builtins"][0]["type"] == "builtin/scanner"
+    assert {b["type"] for b in catalog["builtins"]} >= {
+        "builtin/scanner",
+        "builtin/brief",
+    }
     assert any(c["code"] == "E_NESTED_MAP" for c in catalog["constraints"])
 
 

@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -81,6 +82,25 @@ class CreateProjectRequest(BaseModel):
     template: str | None = None
     input: str | None = None
     model: str | None = None
+
+
+class ImportDocumentsRequest(BaseModel):
+    """Copy documents from a folder into the project's input (SPEC-UI §4)."""
+
+    path: str
+    replace: bool = False  # clear the project's input folder first
+
+
+class BriefRequest(BaseModel):
+    """The research brief a ``input_mode: brief`` pipeline reads (SPEC-UI §4)."""
+
+    text: str
+
+
+class InputSummary(BaseModel):
+    input_dir: str
+    external: bool  # True when input points outside the project (referenced folder)
+    entries: list[str]
 
 
 class SaveTemplateRequest(BaseModel):
@@ -385,6 +405,78 @@ def create_app(
                 )
             )
         return out
+
+    # --- project input (documents / brief) -----------------------------------
+
+    def _input_dir(project_dir: Path) -> Path:
+        from refract.models.config import ProjectConfig
+
+        raw = yaml.safe_load((project_dir / "project.yaml").read_text("utf-8")) or {}
+        config = ProjectConfig.model_validate(raw)
+        return (project_dir / config.input).resolve()
+
+    @api.get("/api/projects/{project_id}/input")
+    def get_input(project_id: str) -> InputSummary:
+        """What the pipeline will scan: the folder and its top-level entries."""
+        pdir = _project_dir(project_id)
+        target = _input_dir(pdir)
+        entries = (
+            sorted(p.name for p in target.iterdir() if not p.name.startswith("."))
+            if target.is_dir()
+            else []
+        )
+        return InputSummary(
+            input_dir=str(target),
+            external=pdir.resolve() not in target.parents
+            and target != (pdir / "input").resolve(),
+            entries=entries,
+        )
+
+    @api.post("/api/projects/{project_id}/input/documents")
+    def import_documents(project_id: str, req: ImportDocumentsRequest) -> InputSummary:
+        """Copy a folder's documents INTO the project (SPEC-UI §4).
+
+        The alternative — referencing an outside folder via ``project.yaml: input:``
+        — stays available at project creation. Copying makes the project
+        self-contained: the sources cannot move or change under a finished run.
+        """
+        pdir = _project_dir(project_id)
+        source = Path(req.path)
+        if not source.is_dir():
+            raise HTTPException(status_code=400, detail=f"not a folder: {req.path}")
+        target = _input_dir(pdir)
+        if req.replace and target.is_dir():
+            for existing in target.iterdir():
+                if existing.is_dir():
+                    shutil.rmtree(existing)
+                else:
+                    existing.unlink()
+        target.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(source.iterdir()):
+            if entry.name.startswith("."):  # tooling artifacts are not sources (§13)
+                continue
+            destination = target / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, destination, dirs_exist_ok=True)
+            else:
+                shutil.copyfile(entry, destination)
+        return get_input(project_id)
+
+    @api.put("/api/projects/{project_id}/input/brief")
+    def put_brief(project_id: str, req: BriefRequest) -> InputSummary:
+        """Store a research brief as the project's single source document.
+
+        A ``brief`` pipeline needs no special engine path — the brief is written to
+        ``input/brief.md`` and scanned like any other document (SPEC §8 input_mode).
+        """
+        text = req.text.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="brief is empty")
+        pdir = _project_dir(project_id)
+        target = _input_dir(pdir)
+        target.mkdir(parents=True, exist_ok=True)
+        _atomic_write(target / "brief.md", text + "\n")
+        return get_input(project_id)
 
     # --- templates -----------------------------------------------------------
 

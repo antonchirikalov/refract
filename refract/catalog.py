@@ -18,7 +18,12 @@ from typing import Any
 from refract.builtins import BUILTINS
 from refract.graph import load_agents
 from refract.models.agent import AgentSpec, Port, capability_tier
-from refract.models.pipeline import AgentParams, LoopParams, SelectParams
+from refract.models.pipeline import (
+    AgentParams,
+    DiscoverParams,
+    LoopParams,
+    SelectParams,
+)
 from refract.registry import ArtifactRegistry
 
 CATALOG_VERSION = "0.1"
@@ -73,6 +78,10 @@ CONSTRAINTS: list[dict[str, str]] = [
     {"code": "E_CYCLE", "rule": "the graph is acyclic"},
     {"code": "E_DUP_NODE_ID", "rule": "node ids are unique"},
     {"code": "E_HITL_SHAPE", "rule": "at most one question@v1 port per agent"},
+    {
+        "code": "E_DISCOVER_SHAPE",
+        "rule": "a discover node's agent produces exactly one dir-kind artifact; the engine turns it into collection<source@v1>",
+    },
     {
         "code": "E_MODEL_UNRESOLVED",
         "rule": "every executable node resolves to a provider/model",
@@ -175,6 +184,16 @@ def build_catalog(library_path: Path | str) -> dict[str, Any]:
                 "params_schema": _params_schema(LoopParams),
                 "blocks": {"body": "agent", "critic": "agent"},
                 "required": ["body", "critic", "outputs"],
+            },
+            {
+                "kind": "discover",
+                "params_schema": _params_schema(DiscoverParams),
+                "required": ["agent"],
+                "outputs": ["sources"],
+                "note": (
+                    "network source of collection<source@v1>; its agent produces one "
+                    "dir artifact and the engine assembles the collection (SPEC §20)"
+                ),
             },
             {
                 "kind": "select",

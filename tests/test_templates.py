@@ -45,7 +45,9 @@ def test_library_agents_load_without_errors() -> None:
     assert errors == []
 
 
-@pytest.mark.parametrize("name", ["extract", "discovery", "solution_design"])
+@pytest.mark.parametrize(
+    "name", ["extract", "discovery", "solution_design", "research"]
+)
 def test_template_validates(name: str) -> None:
     graph = load_pipeline(TEMPLATES / f"{name}.yaml", _ctx())
     assert graph.ok, [(e.code.value, e.node_id, e.message) for e in graph.errors]
@@ -75,6 +77,17 @@ _SCENARIOS: dict[str, dict[str, dict[str, str]]] = {
         "probe": {"arch_report.md": "# Probes\n- What is the SLA target?\n"},
         "discover": {"report.md": _REPORT},
     },
+    "research": {
+        # the discover agent writes ONE dir; the engine makes the collection (§20)
+        "find": {
+            "found/first.md": "# First\nA source.\n",
+            "found/second.md": "# Second\nAnother.\n",
+            "found/third.md": "# Third\nOne more.\n",
+        },
+        "extract:*": {"extract.json": _EXTRACT},
+        "refine.body:*": {"requirements.md": _REQ},
+        "refine.critic:*": {"verdict.json": _APPROVED},
+    },
     "solution_design": {
         "extract:*": {"extract.json": _EXTRACT},
         "refine.body:*": {"requirements.md": _REQ},
@@ -91,7 +104,9 @@ async def _no_sleep(_seconds: float) -> None:
     return None
 
 
-@pytest.mark.parametrize("name", ["extract", "discovery", "solution_design"])
+@pytest.mark.parametrize(
+    "name", ["extract", "discovery", "solution_design", "research"]
+)
 def test_template_runs_end_to_end(name: str, tmp_path: Path) -> None:
     agents, _ = load_agents(LIBRARY)
     registry = ArtifactRegistry.load(LIBRARY)
@@ -105,8 +120,12 @@ def test_template_runs_end_to_end(name: str, tmp_path: Path) -> None:
 
     proj_in = tmp_path / "input"
     proj_in.mkdir()
-    (proj_in / "a.txt").write_text("Doc A", encoding="utf-8")
-    (proj_in / "b.txt").write_text("Doc B", encoding="utf-8")
+    if pipeline.input_mode == "brief":
+        # a brief pipeline reads one written brief instead of a document folder (§20.4)
+        (proj_in / "brief.md").write_text("Research offline sync.", encoding="utf-8")
+    else:
+        (proj_in / "a.txt").write_text("Doc A", encoding="utf-8")
+        (proj_in / "b.txt").write_text("Doc B", encoding="utf-8")
     run_dir = tmp_path / "run"
     (run_dir / "snapshot" / "agents").mkdir(parents=True)
     for ref in agents:
@@ -145,6 +164,15 @@ def test_template_runs_end_to_end(name: str, tmp_path: Path) -> None:
         n.status in (NodeStatus.done, NodeStatus.reused)
         for n in ledger.state.nodes.values()
     )
+    if name == "research":
+        # min_sources satisfied, collection assembled by the engine, map fanned out
+        manifest = json.loads(
+            (
+                run_dir / "steps" / "find" / "_out" / "sources" / "_collection.json"
+            ).read_text("utf-8")
+        )
+        assert manifest["stats"]["ok"] == 3  # min_sources: 3 in the template
+        assert (run_dir / "steps" / "refine" / "_out" / "doc.md").exists()
     if name == "discovery":
         # arch_critic must see BOTH the draft and the requirements it curates
         # against — a live run showed it cannot judge redundancy against a

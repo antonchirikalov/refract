@@ -22,6 +22,7 @@ from refract.models.errors import Code, ValidationError
 from refract.models.pipeline import (
     AgentNode,
     BuiltinNode,
+    DiscoverNode,
     LoopNode,
     Node,
     Pipeline,
@@ -163,6 +164,11 @@ def parse_pipeline_file(
 # --- validator -------------------------------------------------------------
 
 
+# The single output port a discover node exposes (SPEC §20.1) — the engine, not
+# the agent, produces this collection.
+DISCOVER_OUT_PORT = "sources"
+
+
 class _Validator:
     """Runs the §8.3 check phases over a parsed pipeline, collecting findings."""
 
@@ -236,6 +242,10 @@ class _Validator:
                         elif ref.port is not None and ref.port in by_port:
                             out[local] = by_port[ref.port]
             return out
+        if isinstance(node, DiscoverNode):
+            # the engine assembles the agent's dir output into the collection (§20.1),
+            # so the exposed port is fixed regardless of the agent's own port name
+            return {DISCOVER_OUT_PORT: make_collection("source@v1")}
         if isinstance(node, SelectNode):
             src = parse_ref(node.candidates)
             if isinstance(src, DataRef):
@@ -273,6 +283,8 @@ class _Validator:
                 self._require_agent(node.id, node.critic.agent)
             elif isinstance(node, SelectNode):
                 self._require_agent(node.id, node.selector.agent)
+            elif isinstance(node, DiscoverNode):
+                self._require_agent(node.id, node.agent)
 
     def _validate_builtin_params(self, node: BuiltinNode) -> None:
         bdef = self.ctx.builtins[node.builtin_name]
@@ -309,7 +321,7 @@ class _Validator:
     def _data_inputs(self, node: Node) -> list[tuple[str, str]]:
         """External data-edge references on a node (excludes @body / map)."""
         pairs: list[tuple[str, str]] = []
-        if isinstance(node, AgentNode):
+        if isinstance(node, AgentNode | DiscoverNode):
             pairs.extend(node.inputs.items())
         elif isinstance(node, LoopNode):
             for local, ref_s in [
@@ -358,6 +370,8 @@ class _Validator:
                 self._shape_loop(node)
             elif isinstance(node, SelectNode):
                 self._shape_select(node)
+            elif isinstance(node, DiscoverNode):
+                self._shape_discover(node)
 
     def _shape_agent(self, node: AgentNode) -> None:
         if node.map is not None and node.map_over is not None:
@@ -368,6 +382,34 @@ class _Validator:
         self._check_agent_contract(node.id, spec)
         if node.map is not None:
             self._shape_map(node, spec)
+
+    def _shape_discover(self, node: DiscoverNode) -> None:
+        """A discover agent produces exactly one dir artifact (SPEC §20.1).
+
+        The engine turns that directory into ``collection<source@v1>``; an agent with
+        no dir port (or several primary ports) has nothing the engine can assemble.
+        """
+        spec = self.agent(node.agent)
+        if spec is None:
+            return
+        self._check_agent_contract(node.id, spec)
+        primary = [p for p in spec.produces if not p.optional]
+        if len(primary) != 1:
+            self.err(
+                Code.E_DISCOVER_SHAPE,
+                node.id,
+                f"discover agent {spec.ref!r} must have exactly one primary "
+                f"produce port, got {len(primary)}",
+            )
+            return
+        rtype = self.ctx.registry.get(primary[0].type)
+        if rtype is not None and rtype.kind.value != "dir":
+            self.err(
+                Code.E_DISCOVER_SHAPE,
+                node.id,
+                f"discover agent {spec.ref!r} must produce a dir-kind artifact "
+                f"(port {primary[0].port!r} is {rtype.kind.value})",
+            )
 
     def _check_agent_contract(self, node_id: str, spec: AgentSpec) -> None:
         # produces must not be a collection (I6, §16.7)
@@ -471,6 +513,8 @@ class _Validator:
                 self._edges_loop(node)
             elif isinstance(node, SelectNode):
                 self._edges_select(node)
+            elif isinstance(node, DiscoverNode):
+                self._edges_discover(node)
 
     def _edge(
         self, node_id: str, ref_s: str, target_type: str, *, via_map: bool
@@ -488,6 +532,27 @@ class _Validator:
                 node_id,
                 f"{ref_s} ({src_type}) incompatible with target {target_type}",
             )
+
+    def _edges_discover(self, node: DiscoverNode) -> None:
+        """Inputs of a discover node behave like a plain agent's (SPEC §20.1)."""
+        spec = self.agent(node.agent)
+        if spec is None:
+            return
+        consumes = {p.port: p.type for p in spec.consumes}
+        for local, ref_s in node.inputs.items():
+            if local not in consumes:
+                self.err(
+                    Code.E_UNKNOWN_PORT, node.id, f"unknown consumes port {local!r}"
+                )
+                continue
+            self._edge(node.id, ref_s, consumes[local], via_map=False)
+        for p in spec.consumes:
+            if not p.optional and p.port not in node.inputs:
+                self.err(
+                    Code.E_INPUT_MISSING,
+                    node.id,
+                    f"required input port {p.port!r} is not connected",
+                )
 
     def _edges_agent(self, node: AgentNode) -> None:
         spec = self.agent(node.agent)
@@ -644,6 +709,8 @@ class _Validator:
                 self._resolve_model(node.id, f"{node.id}.critic", node.critic.model)
             elif isinstance(node, SelectNode):
                 self._resolve_model(node.id, f"{node.id}.selector", node.selector.model)
+            elif isinstance(node, DiscoverNode):
+                self._resolve_model(node.id, node.id, node.params.model)
 
     def _resolve_model(self, node_id: str, key: str, node_model: str | None) -> None:
         override = self.ctx.model_overrides.get(key)
