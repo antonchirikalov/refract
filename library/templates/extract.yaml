@@ -19,5 +19,5 @@ nodes:
       inputs: { extracts: extract.extract }
     critic:
       agent: requirements_critic@1
-      inputs: { draft: "@body" }
+      inputs: { draft: "@body", extracts: extract.extract }
     outputs: { doc: "@body" }

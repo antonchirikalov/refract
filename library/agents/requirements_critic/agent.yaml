@@ -6,6 +6,7 @@ description: >
   and returns approved or revise with actionable feedback.
 consumes:
   - { port: draft, type: requirements@v1 }
+  - { port: extracts, type: collection<extract@v1> }
 produces:
   - { port: verdict, type: verdict@v1 }
 needs: [read, edit]
