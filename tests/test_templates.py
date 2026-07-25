@@ -145,6 +145,13 @@ def test_template_runs_end_to_end(name: str, tmp_path: Path) -> None:
         n.status in (NodeStatus.done, NodeStatus.reused)
         for n in ledger.state.nodes.values()
     )
+    if name == "discovery":
+        # arch_critic must see BOTH the draft and the requirements it curates
+        # against — a live run showed it cannot judge redundancy against a
+        # document it never receives.
+        discover_in = run_dir / "steps" / "discover" / "main" / "input"
+        assert (discover_in / "draft" / "draft.md").exists()
+        assert (discover_in / "requirements" / "requirements.md").exists()
     if name == "solution_design":
         # the winner_model binding resolved and the final loop assembled its output
         assert ledger.get_node("choose").winner_model == "openai/gpt-5.6"

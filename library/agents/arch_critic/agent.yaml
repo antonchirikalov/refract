@@ -7,6 +7,7 @@ description: >
   workshop-ready discovery document (spectra's arch_critic).
 consumes:
   - { port: draft, type: arch_report@v1 }
+  - { port: requirements, type: requirements@v1 }
 produces:
   - { port: report, type: discovery_report@v1 }
 needs: [read, edit]

@@ -194,6 +194,28 @@ def _model_ref(model: str) -> dict[str, str]:
     return {"providerID": provider, "modelID": model_id}
 
 
+def _error_summary(error: object, *, limit: int = 500) -> str:
+    """Compact one-line summary of an opencode message error.
+
+    The raw error carries the provider's whole HTTP response — headers, cookies,
+    the body repeated — and it lands in ``state.json`` and ``refract status``
+    output verbatim. A live Discovery run showed why that is wrong: a provider
+    quota message came with a ``set-cookie`` header that was then persisted in the
+    ledger, and the useful sentence was buried in ~2 KB of transport noise.
+    """
+    if isinstance(error, dict):
+        raw_data = error.get("data")
+        data = raw_data if isinstance(raw_data, dict) else {}
+        name = str(error.get("name") or "error")
+        status = data.get("statusCode") or error.get("statusCode")
+        message = data.get("message") or error.get("message")
+        if message:
+            head = f"{name} {status}: " if status else f"{name}: "
+            return (head + str(message))[:limit]
+        return f"{name}: {json.dumps(error, ensure_ascii=False)}"[:limit]
+    return str(error)[:limit]
+
+
 class _TurnSnapshot:
     """Best known state of the agent's turn, refreshed while it runs.
 
@@ -386,7 +408,7 @@ class OpencodeRuntime:
                 error = info.get("error")
                 return StepResult(
                     completed=True,
-                    agent_error=json.dumps(error) if error else None,
+                    agent_error=_error_summary(error) if error else None,
                     usage={"cost": info.get("cost"), "tokens": info.get("tokens")},
                 )
         except asyncio.CancelledError:

@@ -7,7 +7,26 @@ part→event mapping are pure, and they carry the I9 trace, so they are tested h
 
 from __future__ import annotations
 
-from refract.runtime.opencode import _events_from_parts, _TurnSnapshot
+from refract.runtime.opencode import (
+    _error_summary,
+    _events_from_parts,
+    _TurnSnapshot,
+)
+
+# Shape of a real provider quota error as opencode returned it (trimmed).
+QUOTA_ERROR = {
+    "name": "APIError",
+    "data": {
+        "message": "You've reached your usage limit for this billing cycle.",
+        "statusCode": 403,
+        "isRetryable": False,
+        "responseHeaders": {
+            "set-cookie": "__cf_bm=Pl7no1suPoXQvU4gmtjjdvywXj4; HttpOnly; Secure",
+            "cf-ray": "a20bad701ed3b801-RIX",
+        },
+        "responseBody": '{"error":{"message":"You\'ve reached your usage limit."}}',
+    },
+}
 
 
 class TestTurnSnapshot:
@@ -51,6 +70,30 @@ class TestTurnSnapshot:
 
         assert snap.parts == [{"type": "text", "text": "kept"}]
         assert snap.text == "kept"
+
+
+class TestErrorSummary:
+    def test_keeps_the_provider_sentence_and_status(self) -> None:
+        summary = _error_summary(QUOTA_ERROR)
+        assert summary.startswith("APIError 403: ")
+        assert "usage limit for this billing cycle" in summary
+
+    def test_drops_transport_noise_and_cookies(self) -> None:
+        # A live run persisted the whole HTTP response — set-cookie included —
+        # into state.json and printed it in `refract status`.
+        summary = _error_summary(QUOTA_ERROR)
+        assert "set-cookie" not in summary
+        assert "__cf_bm" not in summary
+        assert "cf-ray" not in summary
+        assert len(summary) <= 500
+
+    def test_falls_back_without_a_message(self) -> None:
+        assert "weird" in _error_summary({"name": "weird"})
+        assert _error_summary("plain string") == "plain string"
+
+    def test_caps_length(self) -> None:
+        long = {"name": "E", "data": {"message": "x" * 5000, "statusCode": 500}}
+        assert len(_error_summary(long)) == 500
 
 
 class TestEventsFromParts:
