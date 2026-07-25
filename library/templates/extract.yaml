@@ -1,6 +1,10 @@
 version: "0.1"
 name: extract
 
+# Extract mode: turn a folder of source documents (transcripts, RFPs, notes) into
+# one consolidated requirements document. Each source is extracted on its own, then
+# a writer synthesizes them and a critic reviews the draft until it is fit to ship.
+
 nodes:
   - id: scan
     type: builtin/scanner

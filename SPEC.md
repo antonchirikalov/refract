@@ -628,7 +628,7 @@ Params: `exclude: list[str]` (точное имя, только верхний �
 ## 14. CLI (фазы 0–1)
 
 ```
-refract init     <project_dir> --template NAME [--name NAME] [--model PROVIDER/ID] [--force]
+refract init     <project_dir> --template NAME [--name NAME] [--model PROVIDER/ID] [--force] [--input PATH]
 refract templates
 refract validate <project_dir> [--pipeline NAME]
 refract run      <project_dir> [--pipeline NAME] [--model-for KEY=MODEL]... [--workers-for NODE=N]...
@@ -646,6 +646,12 @@ refract catalog  [--json]                                            # §19.1 (�
 > minimal `project.yaml` + empty `input/`; it is pure scaffolding (no validation),
 > refusing to overwrite an existing `project.yaml` without `--force`. `templates`
 > lists the stems under `<library>/templates/`.
+>
+> CHANGED (2026-07-25): `init --input PATH` — папка с документами может лежать где
+> угодно и НЕ копируется (`project.yaml: input:` как есть); без флага проект получает
+> свой пустой `input/`. Шаблоны резолвятся из двух источников — `<library>/templates/`
+> и `<refract_home>/templates/` (пользовательские, SPEC-UI §5); `templates` печатает
+> источник каждого.
 
 `--pipeline` обязателен, если в `pipelines/` больше одного файла. Активный ран — по
 `.active.lock` (pid жив → отказ старта нового рана в проекте). Прогресс в stdout —

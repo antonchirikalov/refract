@@ -43,6 +43,7 @@ from refract.runtime.base import AgentRuntime
 from refract.scheduler import node_dependencies, run_pipeline
 from refract.snapshot import build_snapshot
 from refract.state import Ledger
+from refract.templates_lib import find_template, list_templates
 
 # Exit codes (SPEC §14; test_cli asserts these).
 EXIT_OK = 0
@@ -817,19 +818,18 @@ def _print_run_summary(ledger: Ledger) -> None:
 
 
 def _available_templates(app: AppConfig) -> list[str]:
-    """Pipeline template stems shipped in ``<library>/templates/`` (SPEC §14)."""
-    d = app.library_path / "templates"
-    return sorted(p.stem for p in d.glob("*.yaml")) if d.is_dir() else []
+    """Template names from both sources — shipped and the user's (SPEC-UI §5)."""
+    return [t.name for t in list_templates(app.library_path, refract_home())]
 
 
 def templates_impl(app: AppConfig) -> int:
     """List available pipeline templates (SPEC §14)."""
-    names = _available_templates(app)
-    if not names:
+    refs = list_templates(app.library_path, refract_home())
+    if not refs:
         typer.echo(f"no templates in {app.library_path / 'templates'}")
         return EXIT_OK
-    for name in names:
-        typer.echo(name)
+    for ref in refs:
+        typer.echo(f"{ref.name:<20} {ref.source}")
     return EXIT_OK
 
 
@@ -872,39 +872,47 @@ def init_impl(
     name: str | None = None,
     model: str = "openai/gpt-5.6",
     force: bool = False,
+    input_dir: str | None = None,
 ) -> int:
-    """Scaffold a new project from a library template (SPEC §14).
+    """Scaffold a new project from a template (SPEC §14, SPEC-UI §5).
 
-    Copies ``<library>/templates/<template>.yaml`` into ``<project>/pipelines/``
-    and writes a minimal ``project.yaml`` + empty ``input/``. Pure scaffolding —
-    the caller runs ``refract validate`` next. Refuses to clobber an existing
+    Copies the template (shipped or the user's own, same resolution the API uses)
+    into ``<project>/pipelines/`` and writes a minimal ``project.yaml``. Without
+    ``input_dir`` the project gets its own empty ``input/``; with it the documents
+    folder is referenced as given and nothing is copied. Pure scaffolding — the
+    caller runs ``refract validate`` next. Refuses to clobber an existing
     ``project.yaml`` unless ``force``.
     """
     project_dir = Path(project_dir)
-    src = app.library_path / "templates" / f"{template}.yaml"
-    if not src.exists():
+    ref = find_template(template, app.library_path, refract_home())
+    if ref is None:
         choices = ", ".join(_available_templates(app)) or "(none)"
         raise UsageError(f"unknown template {template!r} (available: {choices})")
+    src = ref.path
     project_file = project_dir / "project.yaml"
     if project_file.exists() and not force:
         raise UsageError(f"{project_file} already exists (use --force to overwrite)")
 
     (project_dir / "pipelines").mkdir(parents=True, exist_ok=True)
-    (project_dir / "input").mkdir(parents=True, exist_ok=True)
     (project_dir / "pipelines" / f"{template}.yaml").write_text(
         src.read_text("utf-8"), encoding="utf-8"
     )
+    if input_dir is None:
+        (project_dir / "input").mkdir(parents=True, exist_ok=True)
     config = {
         "version": "0.1",
         "name": name or project_dir.resolve().name,
-        "input": "./input",
+        "input": input_dir or "./input",
         "defaults": {"model": model},
     }
     project_file.write_text(
         yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8"
     )
-    typer.echo(f"initialized {project_dir} from template {template!r}")
-    typer.echo("next: add inputs to ./input, then `refract validate` and `refract run`")
+    typer.echo(f"initialized {project_dir} from template {template!r} ({ref.source})")
+    where = input_dir or "./input"
+    typer.echo(
+        f"next: put sources in {where}, then `refract validate` and `refract run`"
+    )
     return EXIT_OK
 
 
@@ -1060,8 +1068,11 @@ def init(
     force: bool = typer.Option(
         False, "--force", help="overwrite existing project.yaml"
     ),
+    input_dir: str | None = typer.Option(
+        None, "--input", help="documents folder to read (any path; not copied)"
+    ),
 ) -> None:
-    """Scaffold a new project from a library template (§14)."""
+    """Scaffold a new project from a template (§14)."""
     _run_cli(
         lambda: init_impl(
             project_dir,
@@ -1070,6 +1081,7 @@ def init(
             name=name,
             model=model,
             force=force,
+            input_dir=input_dir,
         )
     )
 

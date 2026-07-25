@@ -1,6 +1,10 @@
 version: "0.1"
 name: solution_design
 
+# Solution design mode: build requirements from the sources, then draft the solution
+# design with two models in parallel, let a selector pick the stronger candidate, and
+# refine the winner against a critic. The most expensive of the three templates.
+
 nodes:
   - id: scan
     type: builtin/scanner

@@ -5,6 +5,7 @@ Uses the real shipped library (it carries pipeline templates); no network.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -91,3 +92,46 @@ def test_init_refuses_to_clobber_without_force(
     # --force overwrites
     assert init_impl(proj, template="discovery", app=app, force=True) == 0
     assert (proj / "pipelines" / "discovery.yaml").exists()
+
+
+def test_init_with_external_input_folder_references_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SPEC-UI §5: the documents folder is referenced as given, not copied, and the
+    # project gets no input/ of its own.
+    app = _app(monkeypatch)
+    docs = tmp_path / "client-docs"
+    docs.mkdir()
+    proj = tmp_path / "atlas"
+
+    code = init_impl(
+        proj,
+        template="extract",
+        app=app,
+        model="kimi/kimi-k3",
+        input_dir=str(docs),
+    )
+
+    assert code == 0
+    config = yaml.safe_load((proj / "project.yaml").read_text("utf-8"))
+    assert config["input"] == str(docs)
+    assert not (proj / "input").exists()
+
+
+def test_init_resolves_a_user_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SPEC-UI §5: templates saved by the user resolve the same way as shipped ones.
+    home = tmp_path / "home"
+    (home / "templates").mkdir(parents=True)
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / "library" / "templates" / "extract.yaml",
+        home / "templates" / "mine.yaml",
+    )
+    monkeypatch.setenv("REFRACT_HOME", str(home))
+    app = _app(monkeypatch)
+
+    code = init_impl(tmp_path / "p", template="mine", app=app, model="kimi/kimi-k3")
+
+    assert code == 0
+    assert (tmp_path / "p" / "pipelines" / "mine.yaml").exists()

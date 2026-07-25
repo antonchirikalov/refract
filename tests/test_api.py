@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytest.importorskip("fastapi")  # API tests need the optional `api` extra installed
 from fastapi.testclient import TestClient  # noqa: E402
@@ -62,6 +63,8 @@ def _mock_factory(app: AppConfig, pipeline: Pipeline) -> MockRuntime:
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("MOONSHOT_API_KEY", "sk-test")
+    # keep the user's real ~/.refract out of it: user templates are written there
+    monkeypatch.setenv("REFRACT_HOME", str(tmp_path / "refract-home"))
     projects_root = tmp_path / "projects"
     projects_root.mkdir()
     shutil.copytree(
@@ -315,3 +318,119 @@ def test_catalog_endpoint_serves_the_authoring_catalog(client: TestClient) -> No
     assert {a["ref"] for a in catalog["agents"]} >= {"source_processor@1"}
     assert catalog["builtins"][0]["type"] == "builtin/scanner"
     assert any(c["code"] == "E_NESTED_MAP" for c in catalog["constraints"])
+
+
+# --- projects from templates + template gallery (SPEC-UI §5/§6) ---------------
+
+
+def test_create_project_from_template_with_external_input(
+    client: TestClient, tmp_path: Path
+) -> None:
+    docs = tmp_path / "client-docs"
+    docs.mkdir()
+
+    resp = client.post(
+        "/api/projects",
+        json={
+            "name": "atlas",
+            "template": "extract",
+            "input": str(docs),
+            "model": "kimi/kimi-k3",
+        },
+    )
+
+    assert resp.status_code == 201
+    config = yaml.safe_load(
+        (tmp_path / "projects" / "atlas" / "project.yaml").read_text("utf-8")
+    )
+    # the documents folder is referenced as given, never copied (SPEC-UI §2)
+    assert config["input"] == str(docs)
+    assert config["defaults"]["model"] == "kimi/kimi-k3"
+    assert not (tmp_path / "projects" / "atlas" / "input").exists()
+    assert client.get("/api/projects/atlas/pipelines").json() == ["extract"]
+
+
+def test_create_project_without_template_gets_its_own_input_dir(
+    client: TestClient, tmp_path: Path
+) -> None:
+    resp = client.post("/api/projects", json={"name": "blank"})
+
+    assert resp.status_code == 201
+    config = yaml.safe_load(
+        (tmp_path / "projects" / "blank" / "project.yaml").read_text("utf-8")
+    )
+    assert config["input"] == "./input"
+    assert (tmp_path / "projects" / "blank" / "input").is_dir()
+    assert client.get("/api/projects/blank/pipelines").json() == []
+
+
+def test_create_project_rejects_unknown_template_and_bad_names(
+    client: TestClient,
+) -> None:
+    bad = client.post("/api/projects", json={"name": "x", "template": "nope"})
+    assert bad.status_code == 400
+    assert "extract" in bad.json()["detail"]  # tells you what IS available
+
+    assert client.post("/api/projects", json={"name": "../escape"}).status_code == 400
+    assert (
+        client.post("/api/projects", json={"name": "demo-project"}).status_code == 409
+    )
+
+
+def test_template_gallery_carries_derived_metadata(client: TestClient) -> None:
+    entries = {t["name"]: t for t in client.get("/api/templates").json()}
+
+    assert {"extract", "discovery", "solution_design"} <= set(entries)
+    extract = entries["extract"]
+    assert extract["source"] == "library"
+    assert extract["description"].startswith("Extract mode")
+    assert "source_processor@1" in extract["agents"]
+    assert "mcp:tavily-remote" in extract["needs"]  # UI can warn before running
+    assert extract["reads_input_folder"] is True
+    assert {"id": "scan", "type": "builtin/scanner"} in extract["nodes"]
+
+
+def test_save_project_pipeline_as_user_template(client: TestClient) -> None:
+    resp = client.post(
+        "/api/templates",
+        json={"name": "my-demo", "from_project": "demo-project", "pipeline": "demo"},
+    )
+
+    assert resp.status_code == 201
+    entries = {t["name"]: t for t in client.get("/api/templates").json()}
+    assert entries["my-demo"]["source"] == "user"
+    # and it is immediately usable as a project template
+    assert (
+        client.post(
+            "/api/projects", json={"name": "from-mine", "template": "my-demo"}
+        ).status_code
+        == 201
+    )
+
+
+def test_saving_a_template_refuses_to_shadow_or_duplicate(client: TestClient) -> None:
+    shadow = client.post(
+        "/api/templates",
+        json={"name": "extract", "from_project": "demo-project", "pipeline": "demo"},
+    )
+    assert shadow.status_code == 409
+
+    missing = client.post(
+        "/api/templates",
+        json={"name": "ok", "from_project": "demo-project", "pipeline": "nope"},
+    )
+    assert missing.status_code == 404
+
+
+def test_project_runs_list_reports_ledger_status(client: TestClient) -> None:
+    assert client.get("/api/projects/demo-project/runs").json() == []
+
+    started = client.post("/api/projects/demo-project/runs", json={"pipeline": "demo"})
+    assert started.status_code == 202
+    run_id = started.json()["run_id"]
+    _wait_completed(client, run_id)
+
+    runs = client.get("/api/projects/demo-project/runs").json()
+    assert [r["run_id"] for r in runs] == [run_id]
+    assert runs[0]["pipeline"] == "demo"
+    assert runs[0]["status"] in {"completed", "failed"}

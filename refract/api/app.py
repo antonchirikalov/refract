@@ -44,6 +44,7 @@ from refract.cli import (
     _default_runtime_factory,
     _new_run_id,
     resolve_project,
+    refract_home,
     resume_impl,
     run_impl,
     write_answer,
@@ -53,6 +54,12 @@ from refract.events import EVENTS_FILENAME, utcnow_iso
 from refract.graph import load_agents, load_pipeline
 from refract.models.ledger import RunState
 from refract.registry import ArtifactRegistry
+from refract.templates_lib import (
+    TEMPLATES_SUBDIR,
+    find_template,
+    list_templates,
+    template_metadata,
+)
 
 # Statuses at which no further events flow until the client acts — the WS closes.
 # waiting_human is "paused for an answer", not truly finished, but no events come
@@ -64,7 +71,32 @@ _TERMINAL = {"completed", "failed", "cancelled", "waiting_human"}
 
 
 class CreateProjectRequest(BaseModel):
+    """New project: optionally from a template, pointed at a documents folder.
+
+    ``input`` may live anywhere — the documents folder is referenced, never copied
+    (SPEC-UI §2). ``model`` sets ``defaults.model`` for the project.
+    """
+
     name: str
+    template: str | None = None
+    input: str | None = None
+    model: str | None = None
+
+
+class SaveTemplateRequest(BaseModel):
+    """Save a project's pipeline as a user template (SPEC-UI §5)."""
+
+    name: str
+    from_project: str
+    pipeline: str
+
+
+class RunSummary(BaseModel):
+    run_id: str
+    status: str
+    pipeline: str
+    created_at: str
+    finished_at: str | None = None
 
 
 class ValidationError(BaseModel):
@@ -278,22 +310,115 @@ def create_app(
 
     @api.post("/api/projects", status_code=201)
     def create_project(req: CreateProjectRequest) -> dict[str, str]:
+        """Create a project, optionally from a template (SPEC-UI §5).
+
+        The documents folder is referenced, not copied: ``input`` goes into
+        ``project.yaml`` as given, so it may point anywhere on disk. Without it the
+        project gets its own empty ``input/``.
+        """
         name = req.name.strip()
         if not name or "/" in name or "\\" in name or ".." in name:
             raise HTTPException(status_code=400, detail=f"bad project name {name!r}")
         pdir = st.projects_root / name
         if pdir.exists():
             raise HTTPException(status_code=409, detail=f"project {name!r} exists")
+
+        pipeline_text: str | None = None
+        if req.template is not None:
+            ref = find_template(
+                req.template, st.app_config.library_path, refract_home()
+            )
+            if ref is None:
+                available = ", ".join(
+                    t.name
+                    for t in list_templates(st.app_config.library_path, refract_home())
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown template {req.template!r} (available: {available})",
+                )
+            pipeline_text = ref.path.read_text("utf-8")
+
         (pdir / "pipelines").mkdir(parents=True)
-        (pdir / "input").mkdir()
+        if pipeline_text is not None:
+            (pdir / "pipelines" / f"{req.template}.yaml").write_text(
+                pipeline_text, encoding="utf-8"
+            )
+        config: dict[str, Any] = {"version": "0.1", "name": name}
+        if req.input:
+            config["input"] = req.input
+        else:
+            (pdir / "input").mkdir()
+            config["input"] = "./input"
+        if req.model:
+            config["defaults"] = {"model": req.model}
         (pdir / "project.yaml").write_text(
-            yaml.safe_dump(
-                {"version": "0.1", "name": name, "input": "./input"},
-                sort_keys=False,
-            ),
+            yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
             encoding="utf-8",
         )
         return {"id": name}
+
+    @api.get("/api/projects/{project_id}/runs")
+    def list_project_runs(project_id: str) -> list[RunSummary]:
+        """Runs of a project, newest first — read from each ledger (I7)."""
+        pdir = _project_dir(project_id)
+        runs_dir = pdir / "runs"
+        out: list[RunSummary] = []
+        for candidate in (
+            sorted(
+                (p for p in runs_dir.iterdir() if (p / "state.json").exists()),
+                reverse=True,
+            )
+            if runs_dir.is_dir()
+            else []
+        ):
+            state = RunState.model_validate_json(
+                (candidate / "state.json").read_text("utf-8")
+            )
+            out.append(
+                RunSummary(
+                    run_id=state.run_id,
+                    status=state.status.value,
+                    pipeline=state.pipeline,
+                    created_at=state.created_at,
+                    finished_at=state.finished_at,
+                )
+            )
+        return out
+
+    # --- templates -----------------------------------------------------------
+
+    @api.get("/api/templates")
+    def list_templates_endpoint() -> list[dict[str, Any]]:
+        """Template gallery: shipped + user templates with derived metadata."""
+        agents, _ = load_agents(st.app_config.library_path)
+        return [
+            template_metadata(ref, agents=agents)
+            for ref in list_templates(st.app_config.library_path, refract_home())
+        ]
+
+    @api.post("/api/templates", status_code=201)
+    def save_template(req: SaveTemplateRequest) -> dict[str, str]:
+        """Save a project's pipeline as a user template (SPEC-UI §5)."""
+        name = req.name.strip()
+        if not name or "/" in name or "\\" in name or ".." in name:
+            raise HTTPException(status_code=400, detail=f"bad template name {name!r}")
+        pdir = _project_dir(req.from_project)
+        source = pdir / "pipelines" / f"{req.pipeline}.yaml"
+        if not source.exists():
+            raise HTTPException(
+                status_code=404, detail=f"no pipeline {req.pipeline!r} in that project"
+            )
+        existing = find_template(name, st.app_config.library_path, refract_home())
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"template {name!r} already exists ({existing.source})",
+            )
+        target_dir = refract_home() / TEMPLATES_SUBDIR
+        target_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write(target_dir / f"{name}.yaml", source.read_text("utf-8"))
+        return {"name": name, "source": "user"}
 
     @api.get("/api/projects/{project_id}/pipelines")
     def list_pipelines(project_id: str) -> list[str]:
