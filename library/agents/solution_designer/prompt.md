@@ -13,9 +13,28 @@ Cover, as the requirements warrant:
 - **Risks and mitigations** — where the design is exposed and what reduces that
   exposure.
 
-Produce a markdown document with a top-level heading and clear sections. Do not
-invent requirements the document does not state; where a requirement is ambiguous,
-design to the most defensible reading and note the assumption.
+**Separate what you know from what you chose.** A reader must be able to tell, without
+leaving the document, which statements come from the requirements and which are your
+proposal. So:
+
+- A specific version, product, or vendor tool is a PROPOSAL, not a fact. Name it if it
+  helps a team start, but mark it as one and collect every such choice under a closing
+  `## Assumptions to confirm` section, each with what confirms it. Do not state a
+  version number you are not sure exists; "a current LTS release" beats a wrong number.
+- Never assert what a vendor plans, recommends, or where a product stands in a market:
+  you cannot check it, the reader cannot check it from here, and one false claim of this
+  kind discredits the parts of the document that are solid.
+- The same for the client's environment. Their mail system, file shares, directory,
+  monitoring and container platform are unknown unless the requirements state them —
+  design against them as assumptions, not as facts.
+- Every path that carries personal data must be traced to the end, including
+  notifications and exports. Claiming a data-residency constraint is satisfied "by
+  construction" while an unanalysed egress channel exists is worse than leaving it open.
+
+Produce a markdown document with a top-level heading, clear sections, and the closing
+`## Assumptions to confirm` section. Do not invent requirements the document does not
+state; where a requirement is ambiguous, design to the most defensible reading and say
+which reading you took.
 
 If you are given a previous design draft and reviewer feedback, revise that draft
 to address the feedback rather than starting over.

@@ -58,7 +58,13 @@ def test_template_validates(name: str) -> None:
 # --- end-to-end execution on MockRuntime (SPEC §17 Phase-1 criterion) --------
 
 _REQ = "# Requirements: T\n- FR-1 alpha\n"
-_DESIGN = "# Design\nA solution design body.\n"
+# design_doc@v1 now requires a real body and a declared assumptions section (SPEC §5),
+# so the scripted output must clear the same gate a real agent faces
+_DESIGN = (
+    "# Design\n\n## Approach\n\n"
+    + ("A paragraph of solution design body text that carries weight. " * 40)
+    + "\n\n## Assumptions to confirm\n\n- Versions named are proposals.\n"
+)
 _REPORT = "# Discovery\nOpen questions and unknowns.\n"
 _APPROVED = json.dumps({"verdict": "approved"})
 _EXTRACT = json.dumps({"source": "s", "requirements": [], "trust_level": "low"})

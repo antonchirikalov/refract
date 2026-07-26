@@ -142,7 +142,12 @@ types:
     rules:
       - { rule: regex, pattern: "^# Requirements:", flags: "m" }
       - { rule: regex, pattern: "FR-\\d+" }
-  design_doc@v1:    { kind: file, format: markdown, rules: [{ rule: min_length, value: 2000 }] }
+  design_doc@v1:
+    kind: file
+    format: markdown
+    rules:
+      - { rule: min_length, value: 2000 }
+      - { rule: regex, pattern: '^##\s*Assumptions to confirm', flags: "m" }
   discovery_report@v1: { kind: file, format: markdown }
 ```
 
@@ -498,6 +503,12 @@ Ctrl+C/`cancel`: graceful — новые шаги не стартуют, in-flig
 > CHANGED (2026-07-25): непустота каталога считается ПО НЕ-DOT элементам (как в
 > §13): каталог, где лежит только `.keep`, содержимым не является. Иначе discover-агент
 > (§20), не нашедший ничего, проходил гейт как `ok`.
+>
+> CHANGED (2026-07-26): у `design_doc@v1` в библиотеке появились правила — `min_length`
+> (как в примере §5) и наличие секции `## Assumptions to confirm`. Причина — боевой
+> прогон полной цепочки: без правил документ дизайна проверялся только на «непустой
+> markdown», трёхстрочный дизайн прошёл бы гейт. Гейт по-прежнему судит ФОРМУ; честность
+> пометок судит критик дизайна (§10.3), у которого это теперь блокирующее.
 6. Успех → `done/ok`; запись в леджер (I3); событие.
 
 **Архив попытки**: перед каждым повторным запуском (гейт-ретрай, resume `--retry-failed`,

@@ -9,8 +9,19 @@ Assess the draft on:
   are justified by their trade-offs rather than asserted, and the data flow is
   coherent.
 - **Risk honesty** — real exposures are named with mitigations, not glossed over.
+- **Grounding** — a reader can tell requirement from proposal. Specific versions,
+  products, vendor tools and assumptions about the client's environment belong under
+  `## Assumptions to confirm`, not stated as established fact. Any claim about what a
+  vendor plans or recommends, or where a product stands in a market, is unverifiable
+  and must go. A constraint declared satisfied while a path is left unanalysed — a
+  notification, an export, a third-party channel carrying personal data — is a defect,
+  not a detail.
 - **Buildability** — a competent team could implement from this without having to
   re-derive the core decisions.
 
 Return **approved** only when the design is genuinely sound and buildable. Otherwise
 return **revise** with specific, actionable feedback naming what to fix.
+
+Unverifiable claims stated as fact, and constraints declared satisfied over an
+unexamined path, are **blocking** — they are exactly the defects a reader cannot catch
+without the sources in front of them.

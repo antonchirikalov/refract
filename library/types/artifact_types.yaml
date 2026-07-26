@@ -8,7 +8,15 @@ types:
     rules:
       - { rule: regex, pattern: "^# Requirements:", flags: "m" }
       - { rule: regex, pattern: "FR-\\d+" }
-  design_doc@v1: { kind: file, format: markdown }
+  # A design with no rules passed the gate at three lines; SPEC §5's own example gives
+  # design_doc a min_length. The regex is the mechanical half of "mark what you chose":
+  # the section must exist, and the critic judges whether it is honest.
+  design_doc@v1:
+    kind: file
+    format: markdown
+    rules:
+      - { rule: min_length, value: 2000 }
+      - { rule: regex, pattern: '^##\s*Assumptions to confirm', flags: "m" }
   # Research brief/topic: what a `discover` pipeline searches from (SPEC §20.4).
   brief@v1: { kind: file, format: markdown }
   # A discover agent's output: one file per found source (+ optional _index.json).

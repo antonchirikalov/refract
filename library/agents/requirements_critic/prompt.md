@@ -6,7 +6,10 @@ Assess the draft on:
 
 - **Traceability** — every requirement traces to at least one of the extractions.
   Flag anything fabricated or over-reaching, and anything an extraction clearly
-  established that the draft dropped.
+  established that the draft dropped. A requirement whose GROUND is in the extractions
+  but missing from the draft — the number, defect, legal position or site fact that
+  caused it — counts as dropped: the requirement cannot be defended or retired without
+  it. Treat that as a defect that changes meaning, not as wording.
 - **Testability** — each requirement is one clear, verifiable sentence, correctly
   classified (functional / non-functional / constraint) and uniquely labelled.
 - **Completeness of doubt** — genuine gaps, conflicts, and ambiguities are surfaced

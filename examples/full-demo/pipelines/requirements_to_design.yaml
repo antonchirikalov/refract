@@ -1,0 +1,59 @@
+version: "0.1"
+name: requirements_to_design
+
+# Source documents to a solution design in one run, stopping in the middle so you can
+# read the requirements — and fix them — before any design work starts.
+checkpoints: [refine]
+
+nodes:
+  # Why one pipeline instead of the separate `extract` + `solution_design` templates:
+  # the design nodes read the requirements straight from the node that produced them,
+  # so reuse works (`rerun --from design` recomputes nothing above it) and the chain
+  # from sources to design keeps one run's provenance. Only comments ABOVE `nodes:`
+  # become the gallery description (SPEC-UI §5.1), so this note stays out of the UI.
+
+  - id: scan
+    type: builtin/scanner
+
+  - id: extract
+    type: agent
+    agent: source_processor@1
+    map: scan.sources
+    params: { workers: 3, min_ok: 1 }
+
+  - id: refine
+    type: loop
+    params: { max_rounds: 3 }
+    body:
+      agent: requirements_writer@1
+      inputs: { extracts: extract.extract }
+    critic:
+      agent: requirements_critic@1
+      inputs: { draft: "@body", extracts: extract.extract }
+    outputs: { doc: "@body" }
+
+  - id: design
+    type: agent
+    agent: solution_designer@1
+    inputs: { requirements: refine.doc }
+    map_over: { models: ["kimi/k3", "kimi/kimi-for-coding"] }
+    params: { workers: 2 }
+
+  - id: choose
+    type: select
+    candidates: design.design_doc
+    selector:
+      agent: solution_design_selector@1
+    params: { fallback: first_ok }
+
+  - id: sd_refine
+    type: loop
+    params: { max_rounds: 2 }
+    body:
+      agent: solution_designer@1
+      model: "@choose.winner_model"
+      inputs: { requirements: refine.doc, draft: choose.out }
+    critic:
+      agent: solution_design_critic@1
+      inputs: { draft: "@body" }
+    outputs: { design: "@body" }

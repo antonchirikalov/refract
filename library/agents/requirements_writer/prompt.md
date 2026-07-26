@@ -12,6 +12,11 @@ Your job is consolidation, not transcription. Across the extractions:
 - **Preserve provenance of doubt.** Roll the extractions' open_questions and
   low-trust items into a clearly separated "Open questions" section — do not let
   them masquerade as settled requirements.
+- **Keep the reason.** When a source gives the ground for a requirement — a number, a
+  known defect, a legal position, a physical fact about the site — carry that ground
+  with the requirement. A figure like "four hours offline" without the dead spot that
+  caused it cannot be defended, questioned, or retired later; the requirement survives
+  and its justification is lost.
 
 Produce a markdown document that:
 

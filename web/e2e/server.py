@@ -47,8 +47,12 @@ REQUIREMENTS = """# Requirements: Warehouse Goods Receiving
 - NFR-1: Receiving stays usable for 4 hours without network.
 """
 
-DESIGN = "# Solution Design\n\nAn offline-first client over an ERP integration layer.\n" + (
-    "\nBody paragraph.\n" * 30
+DESIGN = (
+    "# Solution Design\n\nAn offline-first client over an ERP integration layer.\n"
+    + ("\nBody paragraph with enough substance to clear the length rule.\n" * 30)
+    # design_doc@v1 requires this section: the gate checks that it exists, the critic
+    # judges whether it is honest
+    + "\n## Assumptions to confirm\n\n- Versions named above are proposals.\n"
 )
 
 
