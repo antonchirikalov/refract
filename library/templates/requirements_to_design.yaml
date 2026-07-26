@@ -55,5 +55,7 @@ nodes:
       inputs: { requirements: refine.doc, draft: choose.out }
     critic:
       agent: solution_design_critic@1
-      inputs: { draft: "@body" }
+      # the requirements come from three layers up: `inputs` references any node's
+      # port, not just the previous node's (SPEC §8.1)
+      inputs: { draft: "@body", requirements: refine.doc }
     outputs: { design: "@body" }

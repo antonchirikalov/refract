@@ -37,6 +37,8 @@ def _ctx() -> ValidationContext:
         known_providers={"kimi", "openai"},
         available_providers={"kimi", "openai"},
         default_model="kimi/kimi-k3",
+        # the servers the shipped agents need (~/.refract/mcp.yaml declares these)
+        known_mcp_servers={"tavily-remote", "pdf-reader", "paperbanana"},
     )
 
 

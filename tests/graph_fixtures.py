@@ -97,6 +97,7 @@ def make_ctx(
     available_providers: set[str] | None = None,
     default_model: str | None = "kimi/kimi-k3",
     model_overrides: dict[str, str] | None = None,
+    known_mcp_servers: set[str] | None = None,
 ) -> ValidationContext:
     """A ValidationContext with the standard registry + standard agents by default.
 
@@ -112,6 +113,7 @@ def make_ctx(
         ),
         default_model=default_model,
         model_overrides=model_overrides or {},
+        known_mcp_servers=known_mcp_servers,
     )
 
 

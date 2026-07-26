@@ -284,6 +284,7 @@ def _build_context(
         agents=agents,
         known_providers=app.known_providers,
         available_providers=app.available_providers,
+        known_mcp_servers=set(app.mcp.servers),
         default_model=default_model,
         model_overrides=model_overrides,
     )

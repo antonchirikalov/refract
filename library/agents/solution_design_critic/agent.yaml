@@ -6,6 +6,7 @@ description: >
   its requirements and is technically sound, and returns approved or revise.
 consumes:
   - { port: draft, type: design_doc@v1 }
+  - { port: requirements, type: requirements@v1 }
 produces:
   - { port: verdict, type: verdict@v1 }
 needs: [read, edit]

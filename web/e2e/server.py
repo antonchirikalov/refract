@@ -197,7 +197,15 @@ def build() -> tuple[object, Path]:
                 }
             }
         ),
-        mcp=McpFile(),
+        # declared so validation passes; never launched — the runtime is scripted
+        mcp=McpFile.model_validate(
+            {
+                "servers": {
+                    name: {"command": ["true"]}
+                    for name in ("tavily-remote", "pdf-reader", "paperbanana")
+                }
+            }
+        ),
     )
     api = create_app(
         projects_root=workspace,

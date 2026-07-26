@@ -36,6 +36,9 @@ class Code(str, Enum):
     E_AGENT_PRODUCES_COLLECTION = "E_AGENT_PRODUCES_COLLECTION"
     E_HITL_SHAPE = "E_HITL_SHAPE"
     E_DISCOVER_SHAPE = "E_DISCOVER_SHAPE"  # §20.1
+    E_MCP_UNDECLARED = (
+        "E_MCP_UNDECLARED"  # §8.3: needs mcp:<server> with no such server
+    )
     W_CACHE_UNSUPPORTED = "W_CACHE_UNSUPPORTED"
     W_SECURITY = "W_SECURITY"
 

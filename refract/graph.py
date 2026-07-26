@@ -138,6 +138,9 @@ class ValidationContext:
     builtins: dict[str, BuiltinDef] = field(default_factory=lambda: BUILTINS)
     known_providers: set[str] = field(default_factory=set)
     available_providers: set[str] = field(default_factory=set)
+    # Declared MCP servers (``~/.refract/mcp.yaml``). ``None`` means the MCP config was
+    # not loaded, so the check is skipped — the CLI and API always pass the real set.
+    known_mcp_servers: set[str] | None = None
     default_model: str | None = None
     model_overrides: dict[str, str] = field(default_factory=dict)
 
@@ -306,6 +309,18 @@ class _Validator:
                     node_id,
                     f"agent {ref!r} port {port.port!r} uses unknown type {port.type!r}",
                 )
+        # an MCP server the agent needs must be declared, or the step would launch
+        # without the tool it was written around and fail (or silently not use it)
+        declared = self.ctx.known_mcp_servers
+        if declared is not None:
+            for need in spec.needs:
+                if need.startswith("mcp:") and need[len("mcp:") :] not in declared:
+                    self.err(
+                        Code.E_MCP_UNDECLARED,
+                        node_id,
+                        f"agent {ref!r} needs {need!r}, which is not declared in "
+                        f"the MCP config",
+                    )
 
     # -- Phase C: reference existence (node ids + ports) --
 

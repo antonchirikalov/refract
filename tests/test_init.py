@@ -18,7 +18,7 @@ from refract.cli import (
     templates_impl,
     validate_impl,
 )
-from refract.models.config import ProvidersFile
+from refract.models.config import McpFile, ProvidersFile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LIBRARY_PATH = REPO_ROOT / "library"
@@ -29,7 +29,17 @@ def _app(monkeypatch: pytest.MonkeyPatch) -> AppConfig:
     providers = ProvidersFile.model_validate(
         {"providers": {"kimi": {"api_key_env": "MOONSHOT_API_KEY"}}}
     )
-    return AppConfig(library_path=LIBRARY_PATH, providers=providers)
+    # the shipped agents need these servers; an empty MCP config is now a validation
+    # error (E_MCP_UNDECLARED), which is the point of the check
+    mcp = McpFile.model_validate(
+        {
+            "servers": {
+                name: {"command": ["true"]}
+                for name in ("tavily-remote", "pdf-reader", "paperbanana")
+            }
+        }
+    )
+    return AppConfig(library_path=LIBRARY_PATH, providers=providers, mcp=mcp)
 
 
 def test_templates_impl_lists_shipped_templates(
