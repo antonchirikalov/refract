@@ -340,7 +340,15 @@ async def execute_agent_step(
             {
                 "type": "question",
                 "step_id": plan.step_id,
-                "payload": {"question": question.get("question", "")},
+                "payload": {
+                    # `kind` tells a client which control to offer: free text for an
+                    # agent's question, approve/reject for a capability request, a
+                    # continue button for a checkpoint (§16.9/§16.10/§21)
+                    "kind": "hitl",
+                    "question": question.get("question", ""),
+                    "context": question.get("context", ""),
+                    "options": question.get("options", []),
+                },
             }
         )
         step = ledger.get_step(plan.step_id)

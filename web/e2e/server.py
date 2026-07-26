@@ -134,6 +134,45 @@ class ScriptedRuntime:
         return None
 
 
+CONFIRM_PIPELINE = """version: "0.1"
+name: confirm
+input_mode: brief
+
+# `source_finder` is the only agent here that needs `webfetch`, and it sits on a PLAIN
+# agent node — the one shape capability confirmation is wired for (SPEC §16.10).
+nodes:
+  - id: brief
+    type: builtin/brief
+
+  - id: find
+    type: agent
+    agent: source_finder@1
+    inputs: { brief: brief.brief }
+"""
+
+
+def _seed_confirm_project(workspace: Path) -> None:
+    """A project whose policy requires approval before a network-using step runs."""
+    project = workspace / "needs-approval"
+    (project / "pipelines").mkdir(parents=True)
+    (project / "input").mkdir()
+    (project / "input" / "brief.md").write_text(
+        "How do warehouses handle offline barcode receiving?\n", encoding="utf-8"
+    )
+    (project / "pipelines" / "confirm.yaml").write_text(
+        CONFIRM_PIPELINE, encoding="utf-8"
+    )
+    (project / "project.yaml").write_text(
+        "version: '0.1'\n"
+        "name: needs-approval\n"
+        "input: ./input\n"
+        "defaults:\n"
+        "  model: kimi/k3\n"
+        "confirm: [webfetch]\n",
+        encoding="utf-8",
+    )
+
+
 def build() -> tuple[object, Path]:
     home = Path(tempfile.mkdtemp(prefix="refract-e2e-"))
     workspace = home / "projects"
@@ -147,6 +186,7 @@ def build() -> tuple[object, Path]:
         workspace / "extract-project",
         ignore=shutil.ignore_patterns("runs", ".opencode", "node_modules"),
     )
+    _seed_confirm_project(workspace)
     app_config = AppConfig(
         library_path=REPO / "library",
         providers=ProvidersFile.model_validate(

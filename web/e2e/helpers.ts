@@ -50,7 +50,7 @@ export async function createProject(
 ): Promise<string> {
   await page.goto('/#/new')
   await page.getByLabel('Name').fill(name)
-  await page.locator(`.card.selectable:has-text("${template}")`).click()
+  await page.locator(`.card.selectable:has(h3:text-is("${template}"))`).click()
   const docs = page.getByLabel('Documents folder (copied into the project)')
   if (await docs.count()) {
     await docs.fill(SAMPLE_DOCS)

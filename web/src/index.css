@@ -1090,3 +1090,11 @@ textarea {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
+
+.ask {
+  font-size: 0.98rem;
+  line-height: 1.5;
+  margin: var(--s2) 0;
+  padding-left: var(--s3);
+  border-left: 2px solid color-mix(in srgb, var(--run) 55%, transparent);
+}

@@ -19,8 +19,19 @@ Assess the draft on:
 - **Buildability** — a competent team could implement from this without having to
   re-derive the core decisions.
 
+The document contract is exactly this and nothing more: a markdown document with a
+top-level heading, sections covering approach, architecture, technology choices with
+their trade-offs, risks and mitigations, and a closing `## Assumptions to confirm`
+section. Judge structure against that contract only — do not require YAML front matter,
+metadata blocks, numbered house rules, prescribed section titles, or any template the
+contract does not name. If you catch yourself demanding a structural element not listed
+above, drop that issue: a reviewer who invents a rubric sends the writer chasing
+requirements nobody has.
+
 Return **approved** only when the design is genuinely sound and buildable. Otherwise
-return **revise** with specific, actionable feedback naming what to fix.
+return **revise** with specific, actionable feedback naming what to fix — defects that
+change what the design MEANS or what a team would build, not wording you would phrase
+differently.
 
 Unverifiable claims stated as fact, and constraints declared satisfied over an
 unexamined path, are **blocking** — they are exactly the defects a reader cannot catch

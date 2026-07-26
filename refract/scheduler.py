@@ -1131,7 +1131,15 @@ async def run_pipeline(
                     }
                 )
                 emit_event(
-                    {"type": "question", "step_id": node.id, "payload": {"question": q}}
+                    {
+                        "type": "question",
+                        "step_id": node.id,
+                        "payload": {
+                            "kind": "confirm",
+                            "question": q,
+                            "capabilities": need_confirm,
+                        },
+                    }
                 )
                 set_node(node.id, NodeStatus.waiting_human)
                 return NodeStatus.waiting_human
@@ -1225,6 +1233,7 @@ async def run_pipeline(
                 "type": "question",
                 "step_id": node_id,
                 "payload": {
+                    "kind": "checkpoint",
                     "question": (
                         f"Checkpoint at {node_id}: review the output, then continue "
                         f"(refract answer <run> {node_id} continue)"

@@ -106,8 +106,28 @@ export function Run({ project, runId }: { project: string; runId: string }) {
   const waiting = Object.entries(state?.steps ?? {}).find(
     ([, s]) => s.status === 'waiting_human',
   )
+  // What was actually asked lives in the question event, not in the ledger: the banner
+  // used to show only a step id, so a human had to hunt the feed to learn the question.
+  const ask = waiting
+    ? [...events]
+        .reverse()
+        .find((e) => e.type === 'question' && e.step_id === waiting[0])?.payload
+    : undefined
+  const askKind = (ask?.kind as string) ?? 'hitl'
+  const askText = (ask?.question as string) ?? ''
+  const askOptions = (ask?.options as string[]) ?? []
+  const askCapabilities = (ask?.capabilities as string[]) ?? []
   const checkpoint = state?.awaiting_checkpoint ?? null
   const done = state ? TERMINAL.has(state.status) : false
+
+  async function sendAnswer(stepId: string, text: string) {
+    try {
+      await api.answer(runId, stepId, text)
+      setAnswer('')
+    } catch (e) {
+      setError(String(e))
+    }
+  }
 
   // A checkpoint parks the run AFTER a node finished (SPEC §21): review its output —
   // editing it on disk is allowed — then continue, and the rest of the graph runs.
@@ -188,26 +208,73 @@ export function Run({ project, runId }: { project: string; runId: string }) {
 
       {waiting && !checkpoint ? (
         <div className="panel warn">
-          <h3>Waiting for you — {waiting[0]}</h3>
-          <textarea
-            rows={3}
-            value={answer}
-            onChange={(e) => setAnswer(e.target.value)}
-            placeholder="Your answer (or `approve` / `reject` for a capability request)"
-          />
-          <button
-            type="button"
-            className="button primary"
-            disabled={!answer.trim()}
-            onClick={() =>
-              void api
-                .answer(runId, waiting[0], answer)
-                .then(() => setAnswer(''))
-                .catch((e) => setError(String(e)))
-            }
-          >
-            Send answer
-          </button>
+          <h3>
+            {askKind === 'confirm'
+              ? 'Permission needed before this step runs'
+              : 'The agent is asking you a question'}
+          </h3>
+          <p className="muted">
+            <code>{waiting[0]}</code>
+          </p>
+          {askText ? <p className="ask">{askText}</p> : null}
+          {askKind === 'confirm' ? (
+            <>
+              {askCapabilities.length ? (
+                <ul className="inline">
+                  {askCapabilities.map((cap) => (
+                    <li key={cap}>{cap}</li>
+                  ))}
+                </ul>
+              ) : null}
+              <div className="row">
+                <button
+                  type="button"
+                  className="button primary"
+                  onClick={() => void sendAnswer(waiting[0], 'approve')}
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  className="button"
+                  onClick={() => void sendAnswer(waiting[0], 'reject')}
+                >
+                  Reject
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              {askOptions.length ? (
+                <div className="row">
+                  {askOptions.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className="button"
+                      onClick={() => void sendAnswer(waiting[0], option)}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <textarea
+                rows={3}
+                value={answer}
+                onChange={(e) => setAnswer(e.target.value)}
+                placeholder="Your answer"
+              />
+              <button
+                type="button"
+                className="button primary"
+                disabled={!answer.trim()}
+                onClick={() => void sendAnswer(waiting[0], answer)}
+              >
+                Send answer
+              </button>
+            </>
+          )}
         </div>
       ) : null}
 
