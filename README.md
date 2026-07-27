@@ -746,7 +746,6 @@ python-теста, 17 e2e, `mypy --strict`, `ruff`.
 | [SPEC-DSL.md](SPEC-DSL.md) | нормативное определение языка `pipeline.yaml`: синтаксис, поля, грамматика ссылок, типы, **все** коды валидации |
 | [SPEC-UI.md](SPEC-UI.md) | спецификация веб-интерфейса |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | связный технический разбор поверх SPEC: принципы, исполнение, состояние, восстановление |
-| [docs/opencode-smoke.md](docs/opencode-smoke.md) | ручная проверка адаптера на настоящем opencode |
 | [PROGRESS.md](PROGRESS.md) | текущая фаза, история живых прогонов и найденных дефектов |
 | [CLAUDE.md](CLAUDE.md) | правила работы с репозиторием для агентов-помощников |
 
