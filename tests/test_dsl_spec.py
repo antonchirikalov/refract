@@ -25,11 +25,20 @@ LIBRARY = REPO / "library"
 _SPEC_TEXT = DSL_SPEC.read_text("utf-8")
 # codes as the document writes them: `E_SOMETHING` / `W_SOMETHING` in backticks
 _MENTIONED = set(re.findall(r"`([EW]_[A-Z_]+)`", _SPEC_TEXT))
+# codes that own a ROW in the §12 table — the closed list a reader consults. Mention
+# anywhere used to satisfy this test, and E_MCP_UNDECLARED slipped through: described
+# in §10, absent from the table that claims to be complete.
+_TABULATED = set(re.findall(r"^\| `([EW]_[A-Z_]+)`", _SPEC_TEXT, re.M))
 
 
 def test_every_code_is_documented() -> None:
     missing = sorted(c.value for c in Code if c.value not in _MENTIONED)
     assert missing == [], f"codes missing from SPEC-DSL.md: {missing}"
+
+
+def test_every_code_has_a_row_in_the_table() -> None:
+    missing = sorted(c.value for c in Code if c.value not in _TABULATED)
+    assert missing == [], f"codes missing from the §12 table: {missing}"
 
 
 def test_no_invented_codes() -> None:

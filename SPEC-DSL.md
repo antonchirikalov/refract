@@ -424,8 +424,10 @@ Builtin-ноды не имеют `inputs`: их вход — входная па
 | Правило | Код |
 |---|---|
 | ни один `produces` не является коллекцией (I6) | `E_AGENT_PRODUCES_COLLECTION` |
-| не больше одного необязательного (`optional`) порта `produces` | `E_HITL_SHAPE` |
-| необязательный порт имеет тип `question@v1` | `E_HITL_SHAPE` |
+| не больше одного необязательного (`optional`) порта `produces` | `E_MCP_UNDECLARED` | агент требует `mcp:<server>`, которого нет в конфиге MCP (проверка пропускается, если конфиг не загружен) |
+| `E_HITL_SHAPE` |
+| необязательный порт имеет тип `question@v1` | `E_MCP_UNDECLARED` | агент требует `mcp:<server>`, которого нет в конфиге MCP (проверка пропускается, если конфиг не загружен) |
+| `E_HITL_SHAPE` |
 | каждый обязательный порт `consumes` подключён (`inputs`, либо элемент `map`) | `E_INPUT_MISSING` |
 | каждый MCP-сервер из `needs: [mcp:<server>]` объявлен в конфиге MCP | `E_MCP_UNDECLARED` |
 
@@ -479,6 +481,7 @@ Builtin-ноды не имеют `inputs`: их вход — входная па
 | `E_LOOP_SHAPE` | первичный выход критика петли не `verdict@v1`; `@prev` в первом элементе цепочки; `@body` в элементе тела; `@body`/`@prev` вне петли |
 | `E_BINDING_ILLEGAL` | негодная привязка `winner_model` (не `select`; кандидаты не из `map_over`; неразбираемая `@`-строка в `model`) |
 | `E_AGENT_PRODUCES_COLLECTION` | агент объявил `produces` с типом коллекции (I6) |
+| `E_MCP_UNDECLARED` | агент требует `mcp:<server>`, которого нет в конфиге MCP (проверка пропускается, если конфиг не загружен) |
 | `E_HITL_SHAPE` | больше одного необязательного `produces`, либо его тип не `question@v1` |
 | `E_DISCOVER_SHAPE` | агент `discover`-ноды не имеет ровно одного первичного порта вида `dir` |
 | `W_CACHE_UNSUPPORTED` | `cache: true` (в v0.1 не реализовано) |

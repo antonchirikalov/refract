@@ -758,7 +758,8 @@ WS   /api/runs/{run_id}/events?from_seq=N
 
 1. Один активный ран на проект (`.active.lock`); правка pipeline при активном ране → 409/ошибка.
 2. Control flow — только `loop` и `select`; условных рёбер нет.
-3. `loop.body` / `loop.critic` — ровно по одному агенту (`E_LOOP_SHAPE`); вложенные loop/map запрещены.
+3. `loop.critic` — ровно один агент; `loop.body` — один агент либо ЦЕПОЧКА агентов
+   (§10.3 CHANGED 2026-07-27); вложенные loop/map запрещены. Нарушения формы — `E_LOOP_SHAPE`.
 4. `map:` не может ссылаться на коллекцию, произведённую map/map_over-нодой (`E_NESTED_MAP`); один map/map_over на ноду.
 5. Скалярный биндинг — только `@<select>.winner_model` в `model:` (`E_BINDING_ILLEGAL`).
 6. `cache: true` → `W_CACHE_UNSUPPORTED`, игнор.
