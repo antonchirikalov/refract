@@ -76,6 +76,13 @@ def _library(tmp_path: Path, *, critic_gate_retries: int | None = None) -> tuple
     (lib / "types" / "schemas").mkdir(parents=True)
     (lib / "types" / "artifact_types.yaml").write_text(_TYPES, encoding="utf-8")
     _mk_agent(lib, "writer", [], [{"port": "doc", "type": "requirements@v1"}])
+    # a chain's second element: consumes a draft, produces the polished draft
+    _mk_agent(
+        lib,
+        "polisher",
+        [{"port": "draft", "type": "requirements@v1"}],
+        [{"port": "doc", "type": "requirements@v1"}],
+    )
     _mk_agent(
         lib,
         "critic",
@@ -352,3 +359,153 @@ def test_resume_reuses_done_rounds_from_ledger(tmp_path: Path) -> None:
     assert status2 is RunStatus.completed
     assert reloaded.get_node("refine").status is NodeStatus.done
     assert (run_dir / "steps" / "refine" / "_out" / "doc.md").read_text("utf-8") == DOC2
+
+
+# --- body chain (SPEC §10.3) ------------------------------------------------
+
+
+def _chain_pipeline(*, polisher_model: str | None = None) -> Pipeline:
+    """A loop whose body is two elements: writer → polisher, then one critic."""
+    second: dict = {"agent": "polisher@1", "inputs": {"draft": "@prev"}}
+    if polisher_model is not None:
+        second["model"] = polisher_model
+    return Pipeline.model_validate(
+        {
+            "version": "0.1",
+            "name": "refine",
+            "nodes": [
+                {
+                    "id": "refine",
+                    "type": "loop",
+                    "params": {"max_rounds": 3, "model": "kimi/kimi-k3"},
+                    "body": [{"agent": "writer@1"}, second],
+                    "critic": {"agent": "critic@1", "inputs": {"draft": "@body"}},
+                    "outputs": {"doc": "@body"},
+                }
+            ],
+        }
+    )
+
+
+def test_chain_runs_in_order_and_feeds_prev(tmp_path: Path) -> None:
+    """Elements run in order; @prev carries the previous element's artifact."""
+    _, agents, reg = _library(tmp_path)
+    status, ledger, run_dir = _run(
+        tmp_path,
+        _chain_pipeline(),
+        agents,
+        reg,
+        {
+            "refine.body1:r1": [ScriptedResponse(files={"doc.md": DOC1})],
+            "refine.body2:r1": [ScriptedResponse(files={"doc.md": DOC2})],
+            "refine.critic:r1": [
+                ScriptedResponse(files={"verdict.json": _verdict("approved")})
+            ],
+        },
+    )
+    assert status is RunStatus.completed
+    assert sorted(s for s in ledger.state.steps if s.startswith("refine.")) == [
+        "refine.body1:r1",
+        "refine.body2:r1",
+        "refine.critic:r1",
+    ]
+    steps = run_dir / "steps" / "refine"
+    # the polisher saw the writer's draft…
+    assert (steps / "body2_r1" / "input" / "draft" / "draft.md").read_text(
+        "utf-8"
+    ) == DOC1
+    # …the critic saw the polisher's (the round's draft is the LAST element)…
+    assert (steps / "critic_r1" / "input" / "draft" / "draft.md").read_text(
+        "utf-8"
+    ) == DOC2
+    # …and so does the node's assembled output
+    assert (steps / "_out" / "doc.md").read_text("utf-8") == DOC2
+
+
+def test_chain_revision_goes_to_the_first_element(tmp_path: Path) -> None:
+    """On r≥2 the FIRST element revises, from the previous round's final draft."""
+    _, agents, reg = _library(tmp_path)
+    status, _, run_dir = _run(
+        tmp_path,
+        _chain_pipeline(),
+        agents,
+        reg,
+        {
+            "refine.body1:r1": [ScriptedResponse(files={"doc.md": DOC1})],
+            "refine.body2:r1": [ScriptedResponse(files={"doc.md": DOC2})],
+            "refine.critic:r1": [
+                ScriptedResponse(files={"verdict.json": _verdict("revise")})
+            ],
+            "refine.body1:r2": [ScriptedResponse(files={"doc.md": DOC3})],
+            "refine.body2:r2": [ScriptedResponse(files={"doc.md": DOC3})],
+            "refine.critic:r2": [
+                ScriptedResponse(files={"verdict.json": _verdict("approved")})
+            ],
+        },
+    )
+    assert status is RunStatus.completed
+    steps = run_dir / "steps" / "refine"
+    prev = steps / "body1_r2" / "input" / "_previous" / "doc.md"
+    assert prev.read_text("utf-8") == DOC2  # the round's draft, not the writer's
+    assert (steps / "body1_r2" / "input" / "_verdict" / "verdict.json").exists()
+    # the second element is not handed a revision context — it polishes what it gets
+    assert not (steps / "body2_r2" / "input" / "_previous").exists()
+
+
+def test_chain_element_keeps_its_own_model(tmp_path: Path) -> None:
+    """Each element resolves its own model, keyed by its block name."""
+    _, agents, reg = _library(tmp_path)
+    pl = _chain_pipeline(polisher_model="openai/gpt-5.6")
+    status, _, run_dir = _run(
+        tmp_path,
+        pl,
+        agents,
+        reg,
+        {
+            "refine.body1:r1": [ScriptedResponse(files={"doc.md": DOC1})],
+            "refine.body2:r1": [ScriptedResponse(files={"doc.md": DOC2})],
+            "refine.critic:r1": [
+                ScriptedResponse(files={"verdict.json": _verdict("approved")})
+            ],
+        },
+    )
+    assert status is RunStatus.completed
+    steps = run_dir / "steps" / "refine"
+    assert "model=kimi/kimi-k3" in (steps / "body1_r1" / "raw.txt").read_text("utf-8")
+    assert "model=openai/gpt-5.6" in (steps / "body2_r1" / "raw.txt").read_text("utf-8")
+
+
+def test_single_element_body_keeps_historical_ids(tmp_path: Path) -> None:
+    """A one-element chain must be indistinguishable from the old single block."""
+    _, agents, reg = _library(tmp_path)
+    pl = Pipeline.model_validate(
+        {
+            "version": "0.1",
+            "name": "refine",
+            "nodes": [
+                {
+                    "id": "refine",
+                    "type": "loop",
+                    "params": {"max_rounds": 2, "model": "kimi/kimi-k3"},
+                    "body": [{"agent": "writer@1"}],  # a LIST of one
+                    "critic": {"agent": "critic@1", "inputs": {"draft": "@body"}},
+                    "outputs": {"doc": "@body"},
+                }
+            ],
+        }
+    )
+    status, ledger, run_dir = _run(
+        tmp_path,
+        pl,
+        agents,
+        reg,
+        {
+            "refine.body:r1": [ScriptedResponse(files={"doc.md": DOC1})],
+            "refine.critic:r1": [
+                ScriptedResponse(files={"verdict.json": _verdict("approved")})
+            ],
+        },
+    )
+    assert status is RunStatus.completed
+    assert "refine.body:r1" in ledger.state.steps
+    assert (run_dir / "steps" / "refine" / "body_r1").is_dir()

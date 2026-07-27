@@ -30,7 +30,9 @@ from refract.models.agent import AgentSpec
 from refract.models.ledger import NodeStatus, RunStatus, StepOutcome, StepStatus
 from refract.models.pipeline import (
     AgentNode,
+    BodyBlock,
     BuiltinNode,
+    CriticBlock,
     DiscoverNode,
     LoopNode,
     Node,
@@ -98,11 +100,13 @@ def node_dependencies(pipeline: Pipeline) -> dict[str, set[str]]:
                 add(node.id, node.map)
             add_binding(node.id, node.params.model)
         elif isinstance(node, LoopNode):
-            # body/critic external inputs (``@body`` refs are loop-internal, skipped)
-            for ref_s in (*node.body.inputs.values(), *node.critic.inputs.values()):
-                add(node.id, ref_s)
-            add_binding(node.id, node.body.model)
-            add_binding(node.id, node.critic.model)
+            # external inputs of every body element + the critic (``@body``/``@prev``
+            # refs are container-internal and skipped)
+            blocks: list[BodyBlock | CriticBlock] = [*node.body_chain, node.critic]
+            for block in blocks:
+                for ref_s in block.inputs.values():
+                    add(node.id, ref_s)
+                add_binding(node.id, block.model)
         elif isinstance(node, DiscoverNode):
             for ref_s in node.inputs.values():
                 add(node.id, ref_s)
@@ -994,7 +998,9 @@ async def run_pipeline(
             return await run_builtin(node)
         if isinstance(node, LoopNode):
             _guard_confirm_unsupported(
-                node, [node.body.agent, node.critic.agent], "loop"
+                node,
+                [*(b.agent for b in node.body_chain), node.critic.agent],
+                "loop",
             )
             return await run_loop(node, meta_ctx)
         if isinstance(node, SelectNode):

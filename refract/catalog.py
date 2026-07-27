@@ -182,7 +182,9 @@ def build_catalog(library_path: Path | str) -> dict[str, Any]:
             {
                 "kind": "loop",
                 "params_schema": _params_schema(LoopParams),
-                "blocks": {"body": "agent", "critic": "agent"},
+                # body may be one element or a chain of them; the critic is single
+                # by construction — one container, one control artifact (§10.3)
+                "blocks": {"body": "agent | [agent]", "critic": "agent"},
                 "required": ["body", "critic", "outputs"],
             },
             {

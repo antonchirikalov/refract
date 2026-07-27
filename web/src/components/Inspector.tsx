@@ -11,13 +11,20 @@ import { ModelBadge } from './ModelBadge'
 
 export interface Selection {
   nodeId: string
-  block?: 'body' | 'critic' | 'selector'
+  block?: string   // body | critic | selector | body1..bodyN (a chain element)
 }
 
 const ROLE_TITLE: Record<string, string> = {
   body: 'Body — does the work',
   critic: 'Critic — judges the result',
   selector: 'Selector — picks the winner',
+}
+
+/** A chain element is `body1`..`bodyN`: same role, numbered position. */
+function roleTitle(role: string): string {
+  const chain = /^body(\d+)$/.exec(role)
+  if (chain) return `Body step ${chain[1]} — feeds the next one`
+  return ROLE_TITLE[role] ?? role
 }
 
 const PARAM_LABEL: Record<string, string> = {
@@ -114,7 +121,7 @@ export function Inspector({
       </header>
 
       {block ? (
-        <p className="muted">{ROLE_TITLE[block.role]}</p>
+        <p className="muted">{roleTitle(block.role)}</p>
       ) : node.blocks?.length ? (
         <p className="muted">
           A container: it runs {node.blocks.map((b) => b.role).join(' and ')} inside

@@ -110,6 +110,33 @@ next attempt: a transient `401` from the same limiter failed both design steps o
 `resume --retry-failed` recovered them unchanged — provider 401 is not necessarily a bad
 key here.
 
+## Containers: closed archetypes + body chains (2026-07-27)
+
+The owner asked whether containers should take arbitrary elements, and whether loop/select
+should become a general "algorithm" building block. Decided: **closed archetypes**. What
+makes a container a container is not the frame in the UI but the CONTROL decision the
+engine takes from a typed artifact (I4) — so the extension model is `elements + ONE
+controller + one control type` (loop→verdict@v1, select→selection@v1), and a new kind of
+control is a new archetype, not free composition. A general container with an exit
+condition in YAML was rejected: the condition would need an expression language over
+artifacts, which weakens static validation and opens a way around I4. Selection criteria
+stay in the selector agent's prompt (I5), not in pipeline.yaml — they are judgement, not
+mechanics.
+
+What DID ship, because it was the real deficit: `loop.body` may be a **chain** of elements
+("write → fact-check → judge" needs three roles but still one verdict). Elements run in
+order per round, `@prev` carries the previous element's artifact, the LAST element's output
+is the round's draft (what `@body` means, what the critic judges, what `_previous` comes
+from), and only the FIRST element gets the revision context. Step ids: a one-element body
+keeps `body:r{n}`; longer chains use `body1`, `body2`, …. Also closed a silent hole:
+`@body`/`@prev` outside a loop, and `@prev` on the first element, used to be ignored (the
+input simply stayed unconnected) and are now `E_LOOP_SHAPE`.
+
+Covered by 14 new tests (loop chain execution incl. revision routing and per-element
+models, validator rules, `body1..bodyN` patch addressing) plus 3 Playwright specs over a
+seeded chain project. `requirements_fact_checker@1` was added to the library as the natural
+middle element; no shipped template uses it yet — that needs a live run first.
+
 ## Phase status
 
 | Phase | Scope (SPEC §17) | Status |

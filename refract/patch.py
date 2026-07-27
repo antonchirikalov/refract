@@ -13,6 +13,7 @@ model would be a poor trade.
 from __future__ import annotations
 
 import io
+import re
 from typing import Any
 
 from pydantic import BaseModel
@@ -26,6 +27,8 @@ from refract.models.pipeline import (
 )
 
 BLOCKS = ("body", "critic", "selector")
+# a loop body may be a CHAIN, whose elements are addressed body1..bodyN (SPEC §10.3)
+_CHAIN_BLOCK = re.compile(r"^body(\d+)$")
 
 _PARAMS_MODEL: dict[str, type[BaseModel]] = {
     "agent": AgentParams,
@@ -83,20 +86,16 @@ def apply_node_patch(
         raise KeyError(f"no node {node_id!r} in this pipeline")
 
     node_type = str(target.get("type", ""))
-    if block is not None:
-        if block not in BLOCKS:
-            raise ValueError(f"unknown block {block!r}")
-        if block not in target:
-            raise KeyError(f"node {node_id!r} has no {block!r} block")
+    holder_for_block = _block_holder(target, block, node_id) if block else None
 
     if unset_model:
         # back to the project default (§7): drop the field rather than write null
-        holder = target[block] if block else target.get("params")
+        holder = holder_for_block if block else target.get("params")
         if isinstance(holder, dict):
             holder.pop("model", None)
     elif model is not None:
-        if block:
-            target[block]["model"] = model
+        if holder_for_block is not None:
+            holder_for_block["model"] = model
         else:
             if not isinstance(target.get("params"), dict):
                 target["params"] = {}
@@ -112,3 +111,33 @@ def apply_node_patch(
     out = io.StringIO()
     yaml.dump(doc, out)
     return out.getvalue()
+
+
+def _block_holder(target: Any, block: str, node_id: str) -> Any:
+    """The mapping a block name addresses, resolving chain elements (SPEC §10.3).
+
+    ``body`` on a chain of one means that element (the historical spelling still
+    works); on a longer chain it is ambiguous and refused, since silently editing
+    the first element is not what an author asking for "the body" means.
+    """
+    chain_match = _CHAIN_BLOCK.match(block)
+    if block not in BLOCKS and chain_match is None:
+        raise ValueError(f"unknown block {block!r}")
+    body = target.get("body")
+    if chain_match is not None:
+        index = int(chain_match.group(1)) - 1
+        if not isinstance(body, list):
+            raise KeyError(f"node {node_id!r} has no body chain")
+        if not 0 <= index < len(body):
+            raise KeyError(f"node {node_id!r} has no body element {block!r}")
+        return body[index]
+    if block == "body" and isinstance(body, list):
+        if len(body) != 1:
+            raise ValueError(
+                f"node {node_id!r} has a body chain of {len(body)}; "
+                f"address an element as body1..body{len(body)}"
+            )
+        return body[0]
+    if block not in target:
+        raise KeyError(f"node {node_id!r} has no {block!r} block")
+    return target[block]

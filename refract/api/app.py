@@ -24,7 +24,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 from fastapi import (
@@ -124,7 +124,9 @@ class NodePatch(BaseModel):
 
     model: str | None = None
     unset_model: bool = False  # explicit, since `model: null` cannot say "remove"
-    block: Literal["body", "critic", "selector"] | None = None
+    # ``body``/``critic``/``selector``, or ``body1``..``bodyN`` for a chain element
+    # (SPEC §10.3); the exact set depends on the node, so patch.py judges it
+    block: str | None = None
     params: dict[str, Any] | None = None
 
 
@@ -1157,7 +1159,7 @@ def _node_agent_refs(node: Node) -> list[str]:
     if isinstance(node, AgentNode | DiscoverNode):
         return [node.agent]
     if isinstance(node, LoopNode):
-        return [node.body.agent, node.critic.agent]
+        return [*(b.agent for b in node.body_chain), node.critic.agent]
     if isinstance(node, SelectNode):
         return [node.selector.agent]
     return []
@@ -1169,10 +1171,14 @@ def _node_models(resolved_node: dict[str, Any]) -> list[str]:
     if isinstance(over, dict) and isinstance(over.get("models"), list):
         return [str(m) for m in over["models"]]
     out: list[str] = []
-    for holder in ("params", "body", "critic", "selector"):
-        block = resolved_node.get(holder)
-        if isinstance(block, dict):
-            model = block.get("model")
+    holders: list[Any] = []
+    for name in ("params", "body", "critic", "selector"):
+        holder = resolved_node.get(name)
+        # a loop body may be a chain: every element carries its own model
+        holders.extend(holder if isinstance(holder, list) else [holder])
+    for holder in holders:
+        if isinstance(holder, dict):
+            model = holder.get("model")
             if isinstance(model, str) and model and model not in out:
                 out.append(model)
     return out
@@ -1180,14 +1186,17 @@ def _node_models(resolved_node: dict[str, Any]) -> list[str]:
 
 def _node_blocks(node: Node, resolved: dict[str, Any]) -> list[GraphBlock]:
     """The agents a meta-node runs inside itself, with their effective models."""
-    roles: list[tuple[str, str]] = []
+    roles: list[tuple[str, str, Any]] = []
     if isinstance(node, LoopNode):
-        roles = [("body", node.body.agent), ("critic", node.critic.agent)]
+        body_raw = resolved.get("body")
+        for i, element in enumerate(node.body_chain):
+            raw = body_raw[i] if isinstance(body_raw, list) else body_raw
+            roles.append((node.body_block_name(i), element.agent, raw))
+        roles.append(("critic", node.critic.agent, resolved.get("critic")))
     elif isinstance(node, SelectNode):
-        roles = [("selector", node.selector.agent)]
+        roles = [("selector", node.selector.agent, resolved.get("selector"))]
     out: list[GraphBlock] = []
-    for role, agent in roles:
-        block = resolved.get(role)
+    for role, agent, block in roles:
         model = block.get("model") if isinstance(block, dict) else None
         out.append(
             GraphBlock(
@@ -1234,11 +1243,9 @@ def _node_sources(node: Node) -> list[tuple[str, str]]:
     elif isinstance(node, DiscoverNode):
         refs = [*node.inputs.values()]
     elif isinstance(node, LoopNode):
-        refs = [
-            r
-            for r in (*node.body.inputs.values(), *node.critic.inputs.values())
-            if not r.startswith("@")
-        ]
+        inputs: list[dict[str, str]] = [b.inputs for b in node.body_chain]
+        inputs.append(node.critic.inputs)
+        refs = [r for group in inputs for r in group.values() if not r.startswith("@")]
     elif isinstance(node, SelectNode):
         refs = [node.candidates]
     out: list[tuple[str, str]] = []

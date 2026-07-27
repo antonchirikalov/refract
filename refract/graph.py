@@ -21,7 +21,9 @@ from refract.models.agent import AgentSpec, Port
 from refract.models.errors import Code, ValidationError
 from refract.models.pipeline import (
     AgentNode,
+    BodyBlock,
     BuiltinNode,
+    CriticBlock,
     DiscoverNode,
     LoopNode,
     Node,
@@ -57,24 +59,32 @@ class BodyRef:
 
 
 @dataclass(frozen=True)
+class PrevRef:
+    """``@prev`` or ``@prev.<port>`` — output of the previous chain element (§10.3)."""
+
+    port: str | None
+
+
+@dataclass(frozen=True)
 class BindingRef:
     """``@<selectId>.winner_model`` — the only scalar binding (SPEC §8.1)."""
 
     node_id: str
 
 
-Ref = DataRef | BodyRef | BindingRef
+Ref = DataRef | BodyRef | PrevRef | BindingRef
 
 
 def parse_ref(s: str) -> Ref | None:
     """Parse a reference string; ``None`` if it does not match the grammar."""
-    if s.startswith("@body"):
-        rest = s[len("@body") :]
-        if rest == "":
-            return BodyRef(None)
-        if rest.startswith("."):
-            return BodyRef(rest[1:])
-        return None
+    for prefix, make in (("@body", BodyRef), ("@prev", PrevRef)):
+        if s.startswith(prefix):
+            rest = s[len(prefix) :]
+            if rest == "":
+                return make(None)
+            if rest.startswith("."):
+                return make(rest[1:])
+            return None
     if s.startswith("@"):
         body = s[1:]
         if "." in body:
@@ -232,7 +242,8 @@ class _Validator:
                 return {primary.port: make_collection(primary.type)}
             return {p.port: p.type for p in spec.produces}
         if isinstance(node, LoopNode):
-            body = self.agent(node.body.agent)
+            # the LAST chain element produces the loop's draft (§10.3)
+            body = self.agent(node.body_last.agent)
             out: dict[str, str] = {}
             if body is not None:
                 by_port = {p.port: p.type for p in body.produces}
@@ -282,7 +293,8 @@ class _Validator:
             elif isinstance(node, AgentNode):
                 self._require_agent(node.id, node.agent)
             elif isinstance(node, LoopNode):
-                self._require_agent(node.id, node.body.agent)
+                for block in node.body_chain:
+                    self._require_agent(node.id, block.agent)
                 self._require_agent(node.id, node.critic.agent)
             elif isinstance(node, SelectNode):
                 self._require_agent(node.id, node.selector.agent)
@@ -339,9 +351,9 @@ class _Validator:
         if isinstance(node, AgentNode | DiscoverNode):
             pairs.extend(node.inputs.items())
         elif isinstance(node, LoopNode):
+            blocks: list[BodyBlock | CriticBlock] = [*node.body_chain, node.critic]
             for local, ref_s in [
-                *node.body.inputs.items(),
-                *node.critic.inputs.items(),
+                pair for block in blocks for pair in block.inputs.items()
             ]:
                 if not ref_s.startswith("@"):
                     pairs.append((local, ref_s))
@@ -398,7 +410,24 @@ class _Validator:
             elif isinstance(node, DiscoverNode):
                 self._shape_discover(node)
 
+    def _reject_internal_refs(self, node_id: str, inputs: dict[str, str]) -> None:
+        """``@body``/``@prev`` exist only inside a loop container (SPEC §8.1).
+
+        Outside one they used to be silently ignored: the input simply stayed
+        unconnected, and the agent ran without the artifact the author thought it
+        had wired.
+        """
+        for local, ref_s in inputs.items():
+            if isinstance(parse_ref(ref_s), BodyRef | PrevRef):
+                self.err(
+                    Code.E_LOOP_SHAPE,
+                    node_id,
+                    f"input {local!r} uses {ref_s!r}, which is only meaningful "
+                    f"inside a loop container",
+                )
+
     def _shape_agent(self, node: AgentNode) -> None:
+        self._reject_internal_refs(node.id, node.inputs)
         if node.map is not None and node.map_over is not None:
             self.err(Code.E_MAP_CONFLICT, node.id, "node has both map and map_over")
         spec = self.agent(node.agent)
@@ -414,6 +443,7 @@ class _Validator:
         The engine turns that directory into ``collection<source@v1>``; an agent with
         no dir port (or several primary ports) has nothing the engine can assemble.
         """
+        self._reject_internal_refs(node.id, node.inputs)
         spec = self.agent(node.agent)
         if spec is None:
             return
@@ -503,9 +533,39 @@ class _Validator:
                     node.id,
                     "loop critic primary output must be verdict@v1",
                 )
-        body = self.agent(node.body.agent)
-        if body is not None:
-            self._check_agent_contract(node.id, body)
+        for i, block in enumerate(node.body_chain):
+            body = self.agent(block.agent)
+            if body is not None:
+                self._check_agent_contract(node.id, body)
+            self._check_chain_refs(node, i, block.inputs)
+        self._check_chain_refs(node, len(node.body_chain), node.critic.inputs)
+
+    def _check_chain_refs(
+        self, node: LoopNode, index: int, inputs: dict[str, str]
+    ) -> None:
+        """Internal refs must have something to point at (SPEC §10.3).
+
+        ``index`` is the element's position in the chain; the critic is passed
+        ``len(chain)`` because it sits after every body element. ``@prev`` in the
+        first element and ``@body`` in a body element have no source — catching that
+        here beats an engine crash mid-run.
+        """
+        for local, ref_s in inputs.items():
+            ref = parse_ref(ref_s)
+            if isinstance(ref, PrevRef) and index == 0:
+                self.err(
+                    Code.E_LOOP_SHAPE,
+                    node.id,
+                    f"input {local!r} of the first body element uses @prev, "
+                    f"which has no previous element",
+                )
+            if isinstance(ref, BodyRef) and index < len(node.body_chain):
+                self.err(
+                    Code.E_LOOP_SHAPE,
+                    node.id,
+                    f"input {local!r} of a body element uses @body (the body's own "
+                    f"output); use @prev for the previous element",
+                )
 
     def _shape_select(self, node: SelectNode) -> None:
         selector = self.agent(node.selector.agent)
@@ -624,7 +684,8 @@ class _Validator:
         return self.producer_types(ref.node_id).get(ref.port)
 
     def _edges_loop(self, node: LoopNode) -> None:
-        self._edges_block_inputs(node.id, node.body.agent, node.body.inputs)
+        for block in node.body_chain:
+            self._edges_block_inputs(node.id, block.agent, block.inputs)
         self._edges_block_inputs(node.id, node.critic.agent, node.critic.inputs)
 
     def _edges_block_inputs(
@@ -689,7 +750,8 @@ class _Validator:
     def _binding_refs(self, node: Node) -> set[str]:
         models: list[str | None] = []
         if isinstance(node, LoopNode):
-            models += [node.body.model, node.critic.model]
+            models += [b.model for b in node.body_chain]
+            models.append(node.critic.model)
         elif isinstance(node, AgentNode):
             models.append(node.params.model)
         elif isinstance(node, SelectNode):
@@ -730,7 +792,9 @@ class _Validator:
             if isinstance(node, AgentNode):
                 self._resolve_model(node.id, node.id, node.params.model)
             elif isinstance(node, LoopNode):
-                self._resolve_model(node.id, f"{node.id}.body", node.body.model)
+                for i, block in enumerate(node.body_chain):
+                    key = f"{node.id}.{node.body_block_name(i)}"
+                    self._resolve_model(node.id, key, block.model)
                 self._resolve_model(node.id, f"{node.id}.critic", node.critic.model)
             elif isinstance(node, SelectNode):
                 self._resolve_model(node.id, f"{node.id}.selector", node.selector.model)
@@ -839,7 +903,7 @@ class _Validator:
         if isinstance(node, AgentNode):
             refs = [node.agent]
         elif isinstance(node, LoopNode):
-            refs = [node.body.agent, node.critic.agent]
+            refs = [*(b.agent for b in node.body_chain), node.critic.agent]
         elif isinstance(node, SelectNode):
             refs = [node.selector.agent]
         return [s for s in (self.agent(r) for r in refs) if s is not None]

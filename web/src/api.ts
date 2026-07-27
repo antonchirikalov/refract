@@ -81,7 +81,8 @@ export const api = {
     patch: {
       model?: string
       unset_model?: boolean
-      block?: 'body' | 'critic' | 'selector'
+      // body | critic | selector | body1..bodyN — a loop body may be a chain
+      block?: string
       params?: Record<string, number | string | boolean>
     },
     baseHash?: string,

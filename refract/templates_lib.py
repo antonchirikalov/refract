@@ -94,7 +94,7 @@ def _agent_refs(pipeline: Pipeline) -> list[str]:
         if isinstance(node, AgentNode):
             candidates = [node.agent]
         elif isinstance(node, LoopNode):
-            candidates = [node.body.agent, node.critic.agent]
+            candidates = [*(b.agent for b in node.body_chain), node.critic.agent]
         elif isinstance(node, SelectNode):
             candidates = [node.selector.agent]
         else:

@@ -174,6 +174,56 @@ def _seed_confirm_project(workspace: Path) -> None:
     )
 
 
+CHAIN_PIPELINE = """version: "0.1"
+name: chain
+
+# A refine loop whose BODY IS A CHAIN (SPEC §10.3): write, then fact-check against the
+# same extracts, then one critic decides. Exercises body1/body2 in the graph and the
+# inspector.
+nodes:
+  - id: scan
+    type: builtin/scanner
+
+  - id: extract
+    type: agent
+    agent: source_processor@1
+    map: scan.sources
+
+  - id: refine
+    type: loop
+    params: { max_rounds: 2 }
+    body:
+      - agent: requirements_writer@1
+        inputs: { extracts: extract.extract }
+      - agent: requirements_fact_checker@1
+        inputs: { draft: "@prev", extracts: extract.extract }
+    critic:
+      agent: requirements_critic@1
+      inputs: { draft: "@body", extracts: extract.extract }
+    outputs: { doc: "@body" }
+"""
+
+
+def _seed_chain_project(workspace: Path) -> None:
+    """A project whose loop body has two elements, for the container UI."""
+    project = workspace / "chain-project"
+    shutil.copytree(
+        REPO / "examples" / "extract-project",
+        project,
+        ignore=shutil.ignore_patterns("runs", ".opencode", "node_modules", "pipelines"),
+    )
+    (project / "pipelines").mkdir(exist_ok=True)
+    (project / "pipelines" / "chain.yaml").write_text(CHAIN_PIPELINE, encoding="utf-8")
+    (project / "project.yaml").write_text(
+        "version: '0.1'\n"
+        "name: chain-project\n"
+        "input: ./input\n"
+        "defaults:\n"
+        "  model: kimi/k3\n",
+        encoding="utf-8",
+    )
+
+
 def build() -> tuple[object, Path]:
     home = Path(tempfile.mkdtemp(prefix="refract-e2e-"))
     workspace = home / "projects"
@@ -188,6 +238,7 @@ def build() -> tuple[object, Path]:
         ignore=shutil.ignore_patterns("runs", ".opencode", "node_modules"),
     )
     _seed_confirm_project(workspace)
+    _seed_chain_project(workspace)
     app_config = AppConfig(
         library_path=REPO / "library",
         providers=ProvidersFile.model_validate(

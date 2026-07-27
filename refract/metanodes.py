@@ -20,10 +20,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from refract.artifacts import artifact_filename, artifact_path, link_or_copy
-from refract.graph import BodyRef, DataRef, parse_ref
+from refract.graph import BodyRef, DataRef, PrevRef, parse_ref
 from refract.models.agent import AgentSpec, Port
 from refract.models.ledger import NodeStatus, StepOutcome, StepState, StepStatus
-from refract.models.pipeline import AgentNode, LoopNode, Node, SelectNode
+from refract.models.pipeline import (
+    AgentNode,
+    BodyBlock,
+    LoopNode,
+    Node,
+    SelectNode,
+)
 from refract.models.types import CollectionManifest, CollectionStatus
 from refract.prompt import RevisionContext
 from refract.registry import ArtifactRegistry, model_slug, parse_type_ref
@@ -140,15 +146,19 @@ def _port_input(
 
 
 async def run_loop(node: LoopNode, ctx: MetaContext) -> NodeStatus:
-    """Run ``body:r1 → critic:r1 → [body:r2 …]`` until approved or max_rounds."""
-    body_agent = ctx.agents[node.body.agent]
+    """Run ``body…:r1 → critic:r1 → [body…:r2 …]`` until approved or max_rounds.
+
+    ``body`` may be a CHAIN of elements (SPEC §10.3): they run in order within a
+    round, each seeing the previous one's output via ``@prev``, and the last one's
+    output is the round's draft — what the critic judges and what ``@body`` means.
+    The control decision stays one verdict from one critic.
+    """
+    chain = node.body_chain
+    last_agent = ctx.agents[node.body_last.agent]
     critic_agent = ctx.agents[node.critic.agent]
-    body_model_raw = node.body.model or node.params.model
     critic_model_raw = node.critic.model or node.params.model
-    assert body_model_raw is not None and critic_model_raw is not None
-    body_model = ctx.resolve_model(body_model_raw)
+    assert critic_model_raw is not None
     critic_model = ctx.resolve_model(critic_model_raw)
-    body_primary = _primary(body_agent)
 
     ctx.set_node(node.id, NodeStatus.running)
 
@@ -156,32 +166,43 @@ async def run_loop(node: LoopNode, ctx: MetaContext) -> NodeStatus:
     last_round = 0
     for r in range(1, node.params.max_rounds + 1):
         last_round = r
-        inputs = list(
-            ctx.resolve_inputs(body_agent, node.body.inputs, f"{node.id}.body")
-        )
-        revision: RevisionContext | None = None
-        if r >= 2:
-            aux, revision = _revision(ctx, node, body_agent, body_primary, r)
-            inputs += aux
-        body = await _run_step(
-            ctx,
-            _plan(
+        prev_out: Path | None = None
+        for i, block in enumerate(chain):
+            name = node.body_block_name(i)
+            agent = ctx.agents[block.agent]
+            model_raw = block.model or node.params.model
+            assert model_raw is not None
+            inputs, internal = _chain_inputs(ctx, node, agent, block, name, prev_out)
+            revision: RevisionContext | None = None
+            if i == 0 and r >= 2:
+                # only the first element revises: it is the one that rewrites from
+                # the previous round's draft plus the verdict
+                aux, revision = _revision(
+                    ctx, node, last_agent, _primary(last_agent), r
+                )
+                inputs += aux
+            workdir = ctx.run_dir / "steps" / node.id / f"{name}_r{r}"
+            step = await _run_step(
                 ctx,
-                step_id=f"{node.id}.body:r{r}",
-                node=node,
-                workdir=ctx.run_dir / "steps" / node.id / f"body_r{r}",
-                agent=body_agent,
-                agent_ref=node.body.agent,
-                model=body_model,
-                inputs=inputs,
-                block=node.body.params,
-                revision=revision,
-            ),
-        )
-        if body.outcome is not StepOutcome.ok:
-            return _fail(ctx, node.id, f"loop body r{r}: {_outcome(body)}")
+                _plan(
+                    ctx,
+                    step_id=f"{node.id}.{name}:r{r}",
+                    node=node,
+                    workdir=workdir,
+                    agent=agent,
+                    agent_ref=block.agent,
+                    model=ctx.resolve_model(model_raw),
+                    inputs=inputs + internal,
+                    block=block.params,
+                    revision=revision,
+                ),
+            )
+            if step.outcome is not StepOutcome.ok:
+                return _fail(ctx, node.id, f"loop {name} r{r}: {_outcome(step)}")
+            prev_out = workdir / "output"
 
-        body_out = ctx.run_dir / "steps" / node.id / f"body_r{r}" / "output"
+        assert prev_out is not None  # the chain has at least one element
+        body_out = prev_out
         critic = await _run_step(
             ctx,
             _plan(
@@ -192,7 +213,7 @@ async def run_loop(node: LoopNode, ctx: MetaContext) -> NodeStatus:
                 agent=critic_agent,
                 agent_ref=node.critic.agent,
                 model=critic_model,
-                inputs=_critic_inputs(ctx, node, critic_agent, body_agent, body_out),
+                inputs=_critic_inputs(ctx, node, critic_agent, last_agent, body_out),
                 block=node.critic.params,
                 revision=None,
             ),
@@ -214,9 +235,40 @@ async def run_loop(node: LoopNode, ctx: MetaContext) -> NodeStatus:
         chosen = last_round
         _warn(ctx, node.id, f"max_rounds ({node.params.max_rounds}) reached; passing")
 
-    _assemble_loop_output(ctx, node, body_agent, chosen)
+    _assemble_loop_output(ctx, node, last_agent, chosen)
     ctx.set_node(node.id, NodeStatus.done)
     return NodeStatus.done
+
+
+def _chain_inputs(
+    ctx: MetaContext,
+    node: LoopNode,
+    agent: AgentSpec,
+    block: BodyBlock,
+    block_name: str,
+    prev_out: Path | None,
+) -> tuple[list[InputSpec], list[InputSpec]]:
+    """Split a chain element's inputs into external edges and ``@prev`` ones.
+
+    Returns ``(external, internal)``; the validator has already rejected ``@prev``
+    on the first element, so ``prev_out`` is never ``None`` where it is needed.
+    """
+    index = [node.body_block_name(i) for i in range(len(node.body_chain))].index(
+        block_name
+    )
+    data_refs: dict[str, str] = {}
+    internal: list[InputSpec] = []
+    for port, ref_s in block.inputs.items():
+        ref = parse_ref(ref_s)
+        if isinstance(ref, PrevRef):
+            assert prev_out is not None and index > 0
+            previous = ctx.agents[node.body_chain[index - 1].agent]
+            src_port = ref.port or _primary(previous).port
+            internal.append(_port_input(ctx, agent, port, src_port, prev_out))
+        else:
+            data_refs[port] = ref_s
+    external = list(ctx.resolve_inputs(agent, data_refs, f"{node.id}.{block_name}"))
+    return external, internal
 
 
 def _outcome(step: StepState) -> str:
@@ -292,8 +344,9 @@ def _revision(
     prev_rtype = ctx.registry.get(body_primary.type)
     assert prev_rtype is not None
     prev_name = artifact_filename(body_primary.port, prev_rtype)
+    last_name = node.body_block_name(len(node.body_chain) - 1)
     prev_src = artifact_path(
-        ctx.run_dir / "steps" / node.id / f"body_r{r - 1}" / "output",
+        ctx.run_dir / "steps" / node.id / f"{last_name}_r{r - 1}" / "output",
         body_primary.port,
         prev_rtype,
     )
@@ -307,7 +360,8 @@ def _revision(
         vrtype,
     )
 
-    hint_file = ctx.agent_dir(node.body.agent) / "revision_hint.md"
+    # the FIRST element is the one that revises, so its package supplies the hint
+    hint_file = ctx.agent_dir(node.body_chain[0].agent) / "revision_hint.md"
     hint = hint_file.read_text("utf-8") if hint_file.exists() else None
 
     aux: list[InputSpec] = [
@@ -344,7 +398,8 @@ def _assemble_loop_output(
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    body_out = ctx.run_dir / "steps" / node.id / f"body_r{chosen}" / "output"
+    last_name = node.body_block_name(len(node.body_chain) - 1)
+    body_out = ctx.run_dir / "steps" / node.id / f"{last_name}_r{chosen}" / "output"
     body_primary = _primary(body_agent)
     produce_type = {p.port: p.type for p in body_agent.produces}
     for out_name, ref_s in node.outputs.items():

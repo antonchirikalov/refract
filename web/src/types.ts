@@ -96,7 +96,7 @@ export interface RunState {
 }
 
 export interface GraphBlock {
-  role: 'body' | 'critic' | 'selector'
+  role: string // body | critic | selector | body1..bodyN (chain element)
   agent: string
   model: string | null
 }

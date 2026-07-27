@@ -52,7 +52,11 @@ class TestCompleteness:
     def test_meta_node_kinds_carry_their_blocks_and_params(self) -> None:
         kinds = {k["kind"]: k for k in _catalog()["node_kinds"]}  # type: ignore[union-attr,index]
         assert set(kinds) == {"agent", "loop", "select", "discover"}
-        assert kinds["loop"]["blocks"] == {"body": "agent", "critic": "agent"}
+        # body takes one agent or a chain of them; the critic is singular (§10.3)
+        assert kinds["loop"]["blocks"] == {
+            "body": "agent | [agent]",
+            "critic": "agent",
+        }
         assert "max_rounds" in kinds["loop"]["params_schema"]["properties"]
         assert kinds["select"]["required"] == ["candidates", "selector"]
         assert kinds["agent"]["fan_out"] == ["map", "map_over"]

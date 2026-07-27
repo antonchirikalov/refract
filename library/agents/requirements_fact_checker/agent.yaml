@@ -1,0 +1,15 @@
+name: requirements_fact_checker
+version: 1
+description: >
+  Corrects a requirements draft against the source extracts and returns the
+  corrected document. A middle element of a refine loop's body chain (SPEC §10.3):
+  it runs between the writer and the critic, so a figure that drifted from its
+  source is fixed before the critic ever judges the draft.
+consumes:
+  - { port: draft, type: requirements@v1 }
+  - { port: extracts, type: collection<extract@v1> }
+produces:
+  - { port: doc, type: requirements@v1 }
+needs: [read, edit]
+defaults:
+  timeout_s: 1800

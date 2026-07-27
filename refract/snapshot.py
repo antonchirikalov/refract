@@ -101,7 +101,8 @@ def used_agent_refs(pipeline: Pipeline) -> list[str]:
         if isinstance(node, AgentNode):
             add(node.agent)
         elif isinstance(node, LoopNode):
-            add(node.body.agent)
+            for block in node.body_chain:
+                add(block.agent)
             add(node.critic.agent)
         elif isinstance(node, SelectNode):
             add(node.selector.agent)
@@ -152,19 +153,32 @@ def build_resolved(
                 overrides=overrides,
                 default_model=default_model,
             )
-            raw["body"]["model"] = resolve_model(
-                f"{node.id}.body",
-                node.body.model,
-                overrides=overrides,
-                default_model=default_model,
-            )
+            # a chain keeps its list shape in the resolved snapshot; each element
+            # gets its own effective model, keyed by its block name
+            if isinstance(raw["body"], list):
+                for i, block in enumerate(node.body_chain):
+                    raw["body"][i]["model"] = resolve_model(
+                        f"{node.id}.{node.body_block_name(i)}",
+                        block.model,
+                        overrides=overrides,
+                        default_model=default_model,
+                    )
+            else:
+                raw["body"]["model"] = resolve_model(
+                    f"{node.id}.body",
+                    node.body_chain[0].model,
+                    overrides=overrides,
+                    default_model=default_model,
+                )
             raw["critic"]["model"] = resolve_model(
                 f"{node.id}.critic",
                 node.critic.model,
                 overrides=overrides,
                 default_model=default_model,
             )
-            _fill_retry_params(raw["params"], _agent_timeout(node.body.agent, agents))
+            _fill_retry_params(
+                raw["params"], _agent_timeout(node.body_last.agent, agents)
+            )
         elif isinstance(node, DiscoverNode):
             # discover runs an agent step, so it needs an effective model too (§20.2)
             raw["params"]["model"] = resolve_model(

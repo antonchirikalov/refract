@@ -135,7 +135,7 @@ function labelPoint(from: Placed, to: Placed, index: number) {
 
 export interface GraphSelection {
   nodeId: string
-  block?: 'body' | 'critic' | 'selector'
+  block?: string   // body | critic | selector | body1..bodyN (a chain element)
 }
 
 interface Props {

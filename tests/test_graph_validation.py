@@ -526,6 +526,90 @@ nodes:
         _order, errors = validate_pipeline(pipeline, ctx)
         assert Code.E_LOOP_SHAPE not in _codes(errors)
 
+    # --- body chains (SPEC §10.3) ---
+
+    def _chain_agents(self) -> dict:
+        agents = standard_agents()
+        polisher = agent_spec(
+            "polisher",
+            consumes=[{"port": "draft", "type": "requirements@v1"}],
+            produces=[{"port": "doc", "type": "requirements@v1"}],
+        )
+        return {**agents, polisher.ref: polisher}
+
+    def _chain_yaml(self, first_input: str, second_input: str) -> str:
+        return f"""
+version: "0.1"
+name: p
+nodes:
+  - id: scan
+    type: builtin/scanner
+  - id: extract
+    type: agent
+    agent: source_processor@1
+    map: scan.sources
+  - id: refine
+    type: loop
+    body:
+      - {{ agent: requirements_writer@1, inputs: {{ extracts: {first_input} }} }}
+      - {{ agent: polisher@1, inputs: {{ draft: {second_input} }} }}
+    critic: {{ agent: requirements_critic@1, inputs: {{ doc: "@body", extracts: extract.extract }} }}
+    outputs: {{ doc: "@body" }}
+"""
+
+    def test_chain_with_prev_is_valid(self, tmp_path: Path) -> None:
+        ctx = make_ctx(tmp_path, agents=self._chain_agents())
+        pipeline = _pipeline(self._chain_yaml("extract.extract", '"@prev"'))
+        _order, errors = validate_pipeline(pipeline, ctx)
+        assert [e for e in errors if not e.code.is_warning] == []
+
+    def test_prev_on_first_element_is_rejected(self, tmp_path: Path) -> None:
+        """@prev in the first element points at nothing (SPEC §10.3)."""
+        agents = self._chain_agents()
+        # first element consuming @prev: legal grammar, impossible position
+        yaml_text = self._chain_yaml('"@prev"', '"@prev"')
+        ctx = make_ctx(tmp_path, agents=agents)
+        _order, errors = validate_pipeline(_pipeline(yaml_text), ctx)
+        assert Code.E_LOOP_SHAPE in _codes(errors)
+
+    def test_body_element_may_not_reference_body(self, tmp_path: Path) -> None:
+        """@body is the body's own output — a body element cannot consume it."""
+        ctx = make_ctx(tmp_path, agents=self._chain_agents())
+        _order, errors = validate_pipeline(
+            _pipeline(self._chain_yaml("extract.extract", '"@body"')), ctx
+        )
+        assert Code.E_LOOP_SHAPE in _codes(errors)
+
+    def test_internal_ref_outside_a_loop_is_rejected(self, tmp_path: Path) -> None:
+        """``@prev``/``@body`` used to be silently ignored on a plain agent node."""
+        ctx = make_ctx(tmp_path, agents=self._chain_agents())
+        pipeline = _pipeline(
+            """
+version: "0.1"
+name: p
+nodes:
+  - id: polish
+    type: agent
+    agent: polisher@1
+    inputs: { draft: "@prev" }
+"""
+        )
+        _order, errors = validate_pipeline(pipeline, ctx)
+        assert Code.E_LOOP_SHAPE in _codes(errors)
+
+    def test_chain_element_model_is_resolved_per_element(
+        self, tmp_path: Path
+    ) -> None:
+        """A bad provider on the SECOND element must be reported, not skipped."""
+        ctx = make_ctx(tmp_path, agents=self._chain_agents())
+        pipeline = _pipeline(
+            self._chain_yaml("extract.extract", '"@prev"').replace(
+                "{ agent: polisher@1", "{ model: nope/x, agent: polisher@1"
+            )
+        )
+        _order, errors = validate_pipeline(pipeline, ctx)
+        assert Code.E_PROVIDER_UNAVAILABLE in _codes(errors)
+
 
 class TestEBindingIllegal:
     def test_scalar_binding_target_not_a_select_node(self, tmp_path: Path) -> None:

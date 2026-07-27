@@ -135,11 +135,46 @@ class AgentNode(_NodeBase):
 
 
 class LoopNode(_NodeBase):
+    """``type: loop`` — a container: body (one element or a chain) + one critic.
+
+    The chain exists because roles inside a loop are often more than two ("write,
+    then fact-check, then judge") while the CONTROL decision stays one verdict. The
+    controller is deliberately singular: a container is an archetype = elements +
+    one controller + one control type (SPEC §10.3), not a free combinator.
+    """
+
     type: Literal["loop"]
     params: LoopParams = Field(default_factory=LoopParams)
-    body: BodyBlock
+    body: BodyBlock | list[BodyBlock]
     critic: CriticBlock
     outputs: dict[str, str]
+
+    @field_validator("body")
+    @classmethod
+    def _body_not_empty(
+        cls, v: BodyBlock | list[BodyBlock]
+    ) -> BodyBlock | list[BodyBlock]:
+        if isinstance(v, list) and not v:
+            raise ValueError("loop body chain must have at least one element")
+        return v
+
+    @property
+    def body_chain(self) -> list[BodyBlock]:
+        """The body as a chain; a single block is a chain of one."""
+        return list(self.body) if isinstance(self.body, list) else [self.body]
+
+    @property
+    def body_last(self) -> BodyBlock:
+        """The element whose output IS the loop's draft (``@body``)."""
+        return self.body_chain[-1]
+
+    def body_block_name(self, index: int) -> str:
+        """Ledger/step name of chain element ``index``.
+
+        A single-element body keeps the historical ``body`` (so run dirs, ledger ids
+        and the API's block enum are unchanged); a chain numbers from ``body1``.
+        """
+        return "body" if len(self.body_chain) == 1 else f"body{index + 1}"
 
 
 class SelectNode(_NodeBase):
