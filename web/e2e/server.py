@@ -50,8 +50,9 @@ REQUIREMENTS = """# Requirements: Warehouse Goods Receiving
 DESIGN = (
     "# Solution Design\n\nAn offline-first client over an ERP integration layer.\n"
     + ("\nBody paragraph with enough substance to clear the length rule.\n" * 30)
-    # design_doc@v1 requires this section: the gate checks that it exists, the critic
-    # judges whether it is honest
+    # design_doc@v1 requires both sections: the gate checks that they exist, the critic
+    # judges whether they are honest
+    + "\n## Risks and mitigations\n\n- Sync conflicts; supervisor review.\n"
     + "\n## Assumptions to confirm\n\n- Versions named above are proposals.\n"
 )
 

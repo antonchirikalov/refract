@@ -6,7 +6,10 @@ types:
     kind: file
     format: markdown
     rules:
-      - { rule: regex, pattern: "^# Requirements:", flags: "m" }
+      # Anchored at the very start on purpose: a live run had the writer prepend a YAML
+      # front-matter block with invented metadata (fr_count: 9 against ten FRs), which
+      # the critic then had to argue about. The gate settles it mechanically.
+      - { rule: regex, pattern: "\\A#\\s*Requirements:" }
       - { rule: regex, pattern: "FR-\\d+" }
   # A design with no rules passed the gate at three lines; SPEC §5's own example gives
   # design_doc a min_length. The regex is the mechanical half of "mark what you chose":
@@ -17,6 +20,10 @@ types:
     rules:
       - { rule: min_length, value: 2000 }
       - { rule: regex, pattern: '^##\s*Assumptions to confirm', flags: "m" }
+      # A live run shipped a design with no risks section at all; the critic spent a
+      # whole round saying so. Heading wording stays free (numbered, singular, "and
+      # mitigations") — only its presence is mechanical.
+      - { rule: regex, pattern: '^#{2,3}[^\n]*[Rr]isk', flags: "m" }
   # Research brief/topic: what a `discover` pipeline searches from (SPEC §20.4).
   brief@v1: { kind: file, format: markdown }
   # A discover agent's output: one file per found source (+ optional _index.json).

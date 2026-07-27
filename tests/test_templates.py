@@ -42,6 +42,27 @@ def _ctx() -> ValidationContext:
     )
 
 
+def test_requirements_type_rejects_front_matter(tmp_path: Path) -> None:
+    """A live run had the writer prepend YAML front matter with invented counts.
+
+    The prose asks it not to; this rule makes the gate settle it (SPEC §10.2).
+    """
+    from refract.artifacts import GatePort, check_port
+
+    registry = ArtifactRegistry.load(LIBRARY)
+    rtype = registry.get("requirements@v1")
+    assert rtype is not None
+    body = "# Requirements: T\n\n- FR-1 alpha is testable.\n"
+    for content, ok in (
+        (body, True),
+        ("---\nfr_count: 9\n---\n\n" + body, False),
+    ):
+        out = tmp_path / ("ok" if ok else "bad")
+        out.mkdir()
+        (out / "doc.md").write_text(content, encoding="utf-8")
+        assert check_port(out, GatePort(port="doc", rtype=rtype)).ok is ok
+
+
 def test_library_agents_load_without_errors() -> None:
     _, errors = load_agents(LIBRARY)
     assert errors == []
@@ -65,6 +86,7 @@ _REQ = "# Requirements: T\n- FR-1 alpha\n"
 _DESIGN = (
     "# Design\n\n## Approach\n\n"
     + ("A paragraph of solution design body text that carries weight. " * 40)
+    + "\n\n## Risks and mitigations\n\n- Sync conflicts; supervisor review.\n"
     + "\n\n## Assumptions to confirm\n\n- Versions named are proposals.\n"
 )
 _REPORT = "# Discovery\nOpen questions and unknowns.\n"

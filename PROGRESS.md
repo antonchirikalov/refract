@@ -81,6 +81,35 @@ What the artifacts show, checked against the sources:
   the monthly report carries named supervisors and is *notified* over the corporate
   SMTP gateway, whose residency is never analysed against C-3.
 
+## Live full-chain re-run (2026-07-26/27, kimi/k3)
+
+Same project, fresh run, with the grounding fixes in place. Both fixes proved out:
+
+- the requirements document now **carries the ground with the requirement** (the freezer-
+  aisle Wi-Fi dead spot that causes the 4-hour offline figure is in the document, not just
+  in the extract) and separates conflicts / gaps / assumptions — 5 source conflicts each
+  with the reason for how it was resolved, 11 gaps, 4 marked assumptions. Critic approved
+  in round 1;
+- `solution_design_critic`, now wired with `requirements@v1` (see the `E_MCP_UNDECLARED`
+  commit), returned **revise** with exactly the class of issue it could not previously
+  see: gap G-010 from the requirements is addressed nowhere in the design. It also caught
+  a vendor claim stated as fact (DataWedge "ships on TC21-class devices").
+
+Two defects the run exposed, both closed mechanically rather than by asking the model
+nicely (SPEC §5 CHANGED 2026-07-27):
+
+| Fix | What the run showed |
+|---|---|
+| `requirements@v1` regex anchored at `\A` + writer prompt | the writer prepended YAML front matter with invented metadata; `fr_count: 9` against ten FRs, which the critic then had to spend an issue on |
+| `design_doc@v1` risk-section rule + designer prompt | BOTH design candidates shipped with no risks section at all; a loop round went on a structural remark a gate can settle |
+
+Run status: `scan → extract → refine → checkpoint → design(2) → choose` all done
+(`winner_model = kimi/k3`); `sd_refine` round 2 hit the provider's billing limit
+(`403`) — the tail of the final refinement loop is still unverified live. Note for the
+next attempt: a transient `401` from the same limiter failed both design steps once, and
+`resume --retry-failed` recovered them unchanged — provider 401 is not necessarily a bad
+key here.
+
 ## Phase status
 
 | Phase | Scope (SPEC §17) | Status |

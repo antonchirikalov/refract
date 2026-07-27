@@ -20,7 +20,11 @@ Your job is consolidation, not transcription. Across the extractions:
 
 Produce a markdown document that:
 
-- begins with a top-level heading `# Requirements:` followed by a short project title;
+- begins with a top-level heading `# Requirements:` followed by a short project title —
+  the heading is the FIRST line: no YAML front matter, no metadata block, no counts,
+  tags or scores. Such a block invents facts about the document that nothing checks and
+  that go stale the moment you add a requirement, and a reader who catches one wrong
+  number stops trusting the requirements themselves;
 - groups requirements under clear sections (e.g. Functional, Non-functional,
   Constraints), each requirement labelled `FR-<n>` / `NFR-<n>` and written as one
   testable sentence;
