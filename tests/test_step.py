@@ -428,6 +428,32 @@ class TestInfraRetries:
         assert state.status is StepStatus.failed
         assert state.outcome is StepOutcome.failed_infra
 
+    async def test_the_adapters_reason_reaches_the_ledger(
+        self, tmp_path: Path, registry: ArtifactRegistry
+    ) -> None:
+        """An adapter may explain a retryable failure; "exhausted" alone misleads.
+
+        The opencode adapter routes a transient provider error (429, a limiter's 401)
+        through the infra retries WITH its summary attached, so a run that died on the
+        provider does not read like an engine bug.
+        """
+        agent = _agent()
+        plan = _plan(tmp_path, registry, agent, infra_retries=1)
+        ledger = _ledger(tmp_path, ["write"])
+        runtime = MockRuntime(
+            {
+                "*": [
+                    ScriptedResponse(
+                        completed=False, agent_error="APIError 429: slow down"
+                    )
+                ]
+            }
+        )
+        state = await execute_agent_step(plan, runtime, ledger, sleeper=_no_sleep)
+
+        assert state.outcome is StepOutcome.failed_infra
+        assert state.error == "APIError 429: slow down"
+
 
 # --- 7. timeout -----------------------------------------------------------------
 

@@ -23,6 +23,7 @@ export function Project({ project }: { project: string }) {
   const [selected, setSelected] = useState<GraphSelection | null>(null)
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [busy, setBusy] = useState(false)
+  const [saved, setSaved] = useState(false)  // this pipeline is now a template
   const [error, setError] = useState<string | null>(null)
   const [brief, setBrief] = useState('')
 
@@ -74,6 +75,27 @@ export function Project({ project }: { project: string }) {
     }
   }
 
+  /**
+   * Copy this project's pipeline into the user template library, so the next project
+   * can start from it. The name has to be new — the server refuses to overwrite a
+   * template (409), and silently replacing someone's template is worse than asking.
+   */
+  async function saveAsTemplate() {
+    if (!pipeline) return
+    const name = window.prompt('Template name', `${project}-${pipeline}`)?.trim()
+    if (!name) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.saveTemplate({ name, from_project: project, pipeline })
+      setSaved(true)
+    } catch (e) {
+      setError(e instanceof ApiError ? JSON.stringify(e.detail) : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const parkedRun = runs.find((r) => r.awaiting_checkpoint) ?? null
   const wantsBrief = graph?.input_mode === 'brief'
   const blocking = (errors ?? []).length > 0
@@ -96,6 +118,15 @@ export function Project({ project }: { project: string }) {
               ))}
             </select>
           ) : null}
+          <button
+            type="button"
+            className="button"
+            disabled={!pipeline || busy}
+            onClick={() => void saveAsTemplate()}
+            title="Reuse this pipeline in new projects"
+          >
+            {saved ? 'saved as template' : 'Save as template'}
+          </button>
           <button
             type="button"
             className="button primary"

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import logging
 import os
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from ruamel.yaml import YAML
 from fastapi import (
     Body,
     FastAPI,
@@ -609,8 +611,26 @@ def create_app(
             )
         target_dir = refract_home() / TEMPLATES_SUBDIR
         target_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write(target_dir / f"{name}.yaml", source.read_text("utf-8"))
+        _atomic_write(target_dir / f"{name}.yaml", _renamed(source, name))
         return {"name": name, "source": "user"}
+
+    def _renamed(source: Path, name: str) -> str:
+        """The pipeline text with its ``name:`` set to the template's name.
+
+        The gallery titles a template by the pipeline's own ``name`` field, so leaving
+        it alone showed the saved template under the source project's pipeline name —
+        a user who saved "erp-discovery" found a card called "chain". Round-tripped
+        through ruamel so comments (which become the gallery description) survive.
+        """
+        yaml_rt = YAML()
+        yaml_rt.preserve_quotes = True
+        yaml_rt.width = 4096
+        doc = yaml_rt.load(source.read_text("utf-8"))
+        if isinstance(doc, dict):
+            doc["name"] = name
+        buffer = io.StringIO()
+        yaml_rt.dump(doc, buffer)
+        return buffer.getvalue()
 
     @api.get("/api/projects/{project_id}/pipelines")
     def list_pipelines(project_id: str) -> list[str]:

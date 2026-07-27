@@ -216,6 +216,42 @@ def _error_summary(error: object, *, limit: int = 500) -> str:
     return str(error)[:limit]
 
 
+def _is_transient(error: object) -> bool:
+    """Whether a provider error is worth retrying (SPEC §10.2 infra retries).
+
+    A live run lost both design steps of a map_over to a single ``401`` that the
+    provider's rate limiter emits under load — the same key answered ``200`` a minute
+    later, and ``resume --retry-failed`` recovered the steps unchanged. Treating that
+    as a final agent failure kills a chain of a dozen LLM steps for nothing.
+
+    Retried: ``429`` (rate limit), ``5xx`` (provider side), and ``401`` — which is
+    normally "bad key" but is also what this limiter returns, and a genuinely bad key
+    just fails three times in a row instead of once. NOT retried: an exhausted quota
+    (``403`` with a billing message), which will still be exhausted after a backoff,
+    and anything below — a malformed request or an unknown model is not a weather
+    condition.
+    """
+    if not isinstance(error, dict):
+        return False
+    data = error.get("data")
+    data = data if isinstance(data, dict) else {}
+    status = data.get("statusCode") or error.get("statusCode")
+    try:
+        code = int(status)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    if code == 429 or 500 <= code <= 599:
+        return True
+    if code != 401:
+        return False
+    message = str(data.get("message") or error.get("message") or "").lower()
+    # a limiter saying "slow down" is transient; a limiter saying "you are out of
+    # money until next cycle" is not, whichever status it picks
+    return not any(
+        word in message for word in ("quota", "billing", "usage limit", "upgrade")
+    )
+
+
 class _TurnSnapshot:
     """Best known state of the agent's turn, refreshed while it runs.
 
@@ -406,10 +442,19 @@ class OpencodeRuntime:
                 self._write_trace(spec, snapshot.text, agent_events)
                 info = snapshot.info
                 error = info.get("error")
+                usage = {"cost": info.get("cost"), "tokens": info.get("tokens")}
+                if error and _is_transient(error):
+                    # completed=False routes it through the engine's infra retries
+                    # with backoff; the summary rides along so the ledger says WHY
+                    return StepResult(
+                        completed=False,
+                        agent_error=_error_summary(error),
+                        usage=usage,
+                    )
                 return StepResult(
                     completed=True,
                     agent_error=_error_summary(error) if error else None,
-                    usage={"cost": info.get("cost"), "tokens": info.get("tokens")},
+                    usage=usage,
                 )
         except asyncio.CancelledError:
             # The step timeout (§10.2) cancels us. CancelledError is a

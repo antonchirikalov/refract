@@ -398,9 +398,11 @@ async def execute_agent_step(
         if result is None:
             return finish(StepOutcome.timeout, tries=tries, error="timeout")
         if not result.completed:
-            return finish(
-                StepOutcome.failed_infra, tries=tries, error="infra retries exhausted"
-            )
+            # keep the adapter's reason when it gave one: "infra retries exhausted"
+            # alone sent a reader looking for an engine bug when the provider had
+            # been answering 429 all along
+            detail = result.agent_error or "infra retries exhausted"
+            return finish(StepOutcome.failed_infra, tries=tries, error=detail)
 
         tries += 1
 

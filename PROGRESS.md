@@ -137,6 +137,18 @@ models, validator rules, `body1..bodyN` patch addressing) plus 3 Playwright spec
 seeded chain project. `requirements_fact_checker@1` was added to the library as the natural
 middle element; no shipped template uses it yet — that needs a live run first.
 
+## Quota-independent fixes (2026-07-27)
+
+Done while the kimi limit was out, so nothing here needed a model:
+
+| Fix | Why |
+|---|---|
+| transient provider errors → infra retries (`opencode._is_transient`) | a single limiter `401` killed both `map_over` design steps; the same key answered `200` a minute later. `429`/`5xx`/limiter-`401` now retry with backoff; an exhausted quota and `400`/`404` stay terminal |
+| adapter's reason reaches the ledger on infra failure | "infra retries exhausted" with no cause sent a reader hunting an engine bug while the provider had been answering `429` |
+| heartbeats collapse in the event feed | a ten-minute step emitted sixty `.. step Ns` lines that buried every state change; the events file still keeps them all (I7) — this is rendering only |
+| "Save as template" button in the project screen | the endpoint had existed since Phase 4 with no way to reach it |
+| **bug found doing that**: saving renames the pipeline | the gallery titles a template by the pipeline's own `name:`, so a template saved as "erp-discovery" appeared as "chain" |
+
 ## Phase status
 
 | Phase | Scope (SPEC §17) | Status |
@@ -149,7 +161,7 @@ middle element; no shipped template uses it yet — that needs a live run first.
 | UI e2e | `web/e2e` (Playwright, `npm run e2e`): 12 specs over the BUILT app + real engine with a scripted runtime — projects, templates, project creation, inspector edits (model, rounds, refused edit), checkpoint park → continue → completed, reject → cancelled, log replay, research/brief flow. Every spec fails on a console error or any 4xx/5xx the page caused | done |
 | UI | SPEC-UI v0.1: projects/new-project/templates/project/run screens; template gallery with derived metadata; documents copied into the project or a brief typed instead; graph derived server-side (`GET .../graph`) so the client never parses YAML; live run view over WS + ledger; HITL answer box; `refract serve` serves API + built SPA | done (API tested; SPA smoke-run, no e2e suite) |
 | 5 | `discover` node (§20): network source of `collection<source@v1>` — agent produces ONE dir, the ENGINE assembles the collection (I6 intact); `builtin/brief` + `brief@v1`/`found_sources@v1` types; `input_mode: documents\|brief` on the pipeline; `source_finder@1` agent + `research` template; reuse = ordinary agent step (fresh search is explicit, §20.3); slug/source_hash by the scanner's rules. **done** (test_discover + template e2e on MockRuntime; not yet run on live LLMs — no provider quota) | done |
-| 4 | authoring catalog (§19.1: agents/builtins/types/node kinds/constraints keyed by validator codes; `GET /api/catalog`, `refract catalog`) **done**; safe pipeline write (§19.2: validate-before-commit, atomic write, `base_hash` optimistic locking, `allow_invalid` drafts) **done**. Graph patch ops were specified and then **rejected before implementation** — see the §19.2 CHANGED note: full rewrite + verification covers the editor case at a fraction of the complexity. UI itself: separate spec, in design | in progress |
+| 4 | authoring catalog (§19.1: agents/builtins/types/node kinds/constraints keyed by validator codes; `GET /api/catalog`, `refract catalog`) **done**; safe pipeline write (§19.2: validate-before-commit, atomic write, `base_hash` optimistic locking, `allow_invalid` drafts) **done**. Graph patch ops were specified and then **rejected before implementation** — see the §19.2 CHANGED note: full rewrite + verification covers the editor case at a fraction of the complexity. UI itself: separate spec, in design | done (UI editor dropped by the owner's call — templates are hand-authored, the UI shows and runs them) |
 
 ## Phase 0 — SPEC sections checklist
 

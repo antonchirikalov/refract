@@ -317,11 +317,14 @@ export function Run({ project, runId }: { project: string; runId: string }) {
         <div>
           <h2>Events</h2>
           <ul className="feed">
-            {events
-              // when a node is selected: its own events plus run-level ones
-              .filter(
-                (e) => !selected || !e.step_id || e.step_id.startsWith(selected.nodeId),
-              )
+            {collapseHeartbeats(
+              events
+                // when a node is selected: its own events plus run-level ones
+                .filter(
+                  (e) =>
+                    !selected || !e.step_id || e.step_id.startsWith(selected.nodeId),
+                ),
+            )
               .slice(-120)
               .reverse()
               .map((e) => (
@@ -330,6 +333,9 @@ export function Run({ project, runId }: { project: string; runId: string }) {
                   <span className="tag">{e.type}</span>{' '}
                   {e.step_id ? <code>{e.step_id}</code> : null}{' '}
                   <span className="muted">{summarize(e)}</span>
+                  {e.beats && e.beats > 1 ? (
+                    <span className="muted"> ×{e.beats}</span>
+                  ) : null}
                 </li>
               ))}
           </ul>
@@ -337,6 +343,33 @@ export function Run({ project, runId }: { project: string; runId: string }) {
       </div>
     </section>
   )
+}
+
+type FeedItem = RunEvent & { beats?: number }
+
+/**
+ * One line per run of consecutive heartbeats of the same step, keeping the LAST one
+ * (its elapsed_s is the current figure) and counting how many it stands for.
+ *
+ * A step that thinks for ten minutes emits a heartbeat every ten seconds; unfolded,
+ * that is sixty lines burying everything that actually happened. The events file
+ * keeps them all (I7) — this is a rendering decision only.
+ */
+function collapseHeartbeats(events: RunEvent[]): FeedItem[] {
+  const out: FeedItem[] = []
+  for (const event of events) {
+    const last = out[out.length - 1]
+    if (
+      event.type === 'heartbeat' &&
+      last?.type === 'heartbeat' &&
+      last.step_id === event.step_id
+    ) {
+      out[out.length - 1] = { ...event, beats: (last.beats ?? 1) + 1 }
+    } else {
+      out.push(event)
+    }
+  }
+  return out
 }
 
 function summarize(event: RunEvent): string {

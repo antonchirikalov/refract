@@ -419,6 +419,9 @@ def test_save_project_pipeline_as_user_template(client: TestClient) -> None:
     assert resp.status_code == 201
     entries = {t["name"]: t for t in client.get("/api/templates").json()}
     assert entries["my-demo"]["source"] == "user"
+    # the gallery titles a template by the pipeline's own `name` field, so saving must
+    # rename it: otherwise "my-demo" appeared in the gallery as "demo"
+    assert entries["my-demo"]["title"] == "my-demo"
     # and it is immediately usable as a project template
     assert (
         client.post(

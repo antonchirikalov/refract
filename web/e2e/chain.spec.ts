@@ -56,5 +56,13 @@ test('a chain runs element by element and the loop completes', async ({ page }) 
 
   await expect(page.locator('.pill.is-completed')).toBeVisible({ timeout: 60_000 })
   await expect(node(page, 'refine').locator('.gnode-status')).toHaveText('done')
+
+  // consecutive heartbeats of one step collapse to a single line, so a long step
+  // cannot bury the state changes around it
+  const feed = page.locator('.feed')
+  await expect(feed).toContainText('refine.body2:r1')
+  const beats = await feed.locator('li', { hasText: 'heartbeat' }).count()
+  const steps = await feed.locator('li', { hasText: 'step_state_changed' }).count()
+  expect(beats).toBeLessThanOrEqual(steps)
   expect(problems).toEqual([])
 })

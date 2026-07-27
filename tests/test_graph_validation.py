@@ -597,9 +597,7 @@ nodes:
         _order, errors = validate_pipeline(pipeline, ctx)
         assert Code.E_LOOP_SHAPE in _codes(errors)
 
-    def test_chain_element_model_is_resolved_per_element(
-        self, tmp_path: Path
-    ) -> None:
+    def test_chain_element_model_is_resolved_per_element(self, tmp_path: Path) -> None:
         """A bad provider on the SECOND element must be reported, not skipped."""
         ctx = make_ctx(tmp_path, agents=self._chain_agents())
         pipeline = _pipeline(

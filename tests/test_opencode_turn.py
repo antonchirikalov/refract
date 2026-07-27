@@ -10,6 +10,7 @@ from __future__ import annotations
 from refract.runtime.opencode import (
     _error_summary,
     _events_from_parts,
+    _is_transient,
     _TurnSnapshot,
 )
 
@@ -94,6 +95,36 @@ class TestErrorSummary:
     def test_caps_length(self) -> None:
         long = {"name": "E", "data": {"message": "x" * 5000, "statusCode": 500}}
         assert len(_error_summary(long)) == 500
+
+
+class TestIsTransient:
+    """Which provider errors deserve the engine's infra retries (SPEC §10.2)."""
+
+    def _err(self, status: int, message: str = "boom") -> dict:
+        return {"name": "APIError", "data": {"statusCode": status, "message": message}}
+
+    def test_rate_limit_and_server_errors_are_retried(self) -> None:
+        assert _is_transient(self._err(429, "Too many requests"))
+        assert _is_transient(self._err(500))
+        assert _is_transient(self._err(503, "upstream unavailable"))
+
+    def test_a_limiters_401_is_retried(self) -> None:
+        # A live map_over lost both steps to this; the same key answered 200 a
+        # minute later and --retry-failed recovered them unchanged.
+        assert _is_transient(
+            self._err(401, "The API Key appears to be invalid or may have expired.")
+        )
+
+    def test_an_exhausted_quota_is_final(self) -> None:
+        assert not _is_transient(QUOTA_ERROR)
+        assert not _is_transient(self._err(401, "You've reached your usage limit"))
+        assert not _is_transient(self._err(401, "purchase extra usage or upgrade"))
+
+    def test_client_errors_and_junk_are_final(self) -> None:
+        assert not _is_transient(self._err(400, "bad request"))
+        assert not _is_transient(self._err(404, "no such model"))
+        assert not _is_transient({"name": "APIError"})  # no status at all
+        assert not _is_transient("plain string")
 
 
 class TestEventsFromParts:

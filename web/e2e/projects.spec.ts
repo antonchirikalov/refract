@@ -59,3 +59,18 @@ test('a project with no documents cannot be run', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Run' })).toBeDisabled()
   expect(problems).toEqual([])
 })
+
+test('a project pipeline can be saved as a template and reused', async ({ page }) => {
+  const problems = watchForBreakage(page)
+  const name = `tpl-${Date.now().toString().slice(-7)}`
+  page.on('dialog', (d) => void d.accept(name))  // the name prompt
+
+  await page.goto('/#/projects/chain-project')
+  await page.getByRole('button', { name: 'Save as template' }).click()
+  await expect(page.getByRole('button', { name: 'saved as template' })).toBeVisible()
+
+  // it is now offered to new projects, alongside the shipped ones
+  await page.goto('/#/templates')
+  await expect(page.locator('.card', { hasText: name })).toBeVisible()
+  expect(problems).toEqual([])
+})
