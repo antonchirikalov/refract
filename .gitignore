@@ -18,13 +18,10 @@ illustrator-sample/
 # part of .claude/ — the reviewer agents — stays tracked.
 .claude/settings.json
 
-# local / ops docs (environment-specific setup + smoke notes)
-# Contents, not the directory: ignoring `docs/` itself stops git descending,
-# and then no negation inside it can ever match.
-docs/*
-# ...except what README links to: it must not have broken links after a clone
-!docs/ARCHITECTURE.md
-!docs/architecture/
+# Internal documents: specs, engine design, roadmap, progress log, ops notes. The repo is
+# public; these are not. README's illustrations live in assets/ instead, so nothing here
+# needs an exception.
+docs/
 # local test-run scratch
 .smoke-home/
 .illus-smoke/

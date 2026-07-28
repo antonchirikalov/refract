@@ -5,17 +5,21 @@ artifact contracts. **SPEC.md is the single source of truth.** When this file an
 disagree, SPEC.md wins. When code and SPEC.md disagree, that's a bug — fix one of them
 explicitly, never silently.
 
-## Where the specs live
+## Where the internal documents live
 
-The specifications are INTERNAL and deliberately not published. They sit under `docs/spec/`,
-which `.gitignore` excludes together with the rest of `docs/` (only `ARCHITECTURE.md` and
-`architecture/*.png` are tracked, because README links to them).
+The repo is PUBLIC; the specs, the design write-ups, the roadmap and the progress log are not.
+All of them sit under `docs/`, which `.gitignore` excludes entirely. README's illustrations are
+the only images that ship, and they live in `assets/`.
 
 | Path | What |
 |---|---|
 | `docs/spec/SPEC.md` | engine semantics: file formats, execution, ledger, gates, runtime, phases |
 | `docs/spec/SPEC-DSL.md` | normative definition of the `pipeline.yaml` language: syntax, references, types, ALL validation codes |
 | `docs/spec/SPEC-UI.md` | web UI specification |
+| `docs/ARCHITECTURE.md` | engine design write-up on top of the spec |
+| `docs/PROGRESS.md` | current phase, live-run history, defect log |
+| `docs/pipeline-engine-design-v01.md` | original engine design document |
+| `docs/pipeline-project-roadmap.md` | roadmap |
 
 Consequences to respect:
 
@@ -24,8 +28,9 @@ Consequences to respect:
 - README and other published documents must NOT link to these files: a clone does not have
   them and the link would 404. Refer to them as "внутренняя спецификация" instead;
 - `tests/test_dsl_spec.py` reads `docs/spec/SPEC-DSL.md` and SKIPS when it is absent, so a
-  checkout without the specs still has a green suite;
-- when a spec changes, it changes locally only — there is nothing to push.
+  checkout without the internal documents still has a green suite;
+- when any of these documents changes, it changes locally only — there is nothing to push, so
+  the commit message has to carry what the document now says.
 
 ## Commands
 
@@ -63,13 +68,13 @@ violations (see below).
 - I7 CLI/UI render only `state.json` + `events.jsonl`; no separate execution state.
 - I8 Secrets never enter project folders, artifacts, or prompts; runtime env is run-level: union of snapshot providers' keys + MCP tokens from used agents' needs, nothing more.
 - I9 Every AGENT step persists `prompt.md`, `raw.txt`, `agent.events.jsonl` (per attempt); builtin steps keep outputs + ledger only.
-- I10 Do not implement future-phase features early (SPEC §17). Current phase is tracked in `PROGRESS.md`.
+- I10 Do not implement future-phase features early (SPEC §17). Current phase is tracked in `docs/PROGRESS.md`.
 
 ## Workflow rules
 
 - Tests first for engine logic; every feature lands with tests from SPEC §18. Tests use MockRuntime only — no network, no API keys, no real opencode.
 - Windows matters: UTF-8 everywhere explicitly, `pathlib` only, no POSIX-only calls (symlink must have copy fallback).
-- Keep `PROGRESS.md` updated: current phase, done/remaining SPEC sections.
+- Keep `docs/PROGRESS.md` updated: current phase, done/remaining SPEC sections.
 - Any deliberate deviation from SPEC.md: update `docs/spec/SPEC.md` in the same change, mark
   with `> CHANGED (date): reason`. The spec is untracked, so it will not appear in the commit —
   the commit message must then say what the spec now says.
