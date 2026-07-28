@@ -5,6 +5,28 @@ artifact contracts. **SPEC.md is the single source of truth.** When this file an
 disagree, SPEC.md wins. When code and SPEC.md disagree, that's a bug — fix one of them
 explicitly, never silently.
 
+## Where the specs live
+
+The specifications are INTERNAL and deliberately not published. They sit under `docs/spec/`,
+which `.gitignore` excludes together with the rest of `docs/` (only `ARCHITECTURE.md` and
+`architecture/*.png` are tracked, because README links to them).
+
+| Path | What |
+|---|---|
+| `docs/spec/SPEC.md` | engine semantics: file formats, execution, ledger, gates, runtime, phases |
+| `docs/spec/SPEC-DSL.md` | normative definition of the `pipeline.yaml` language: syntax, references, types, ALL validation codes |
+| `docs/spec/SPEC-UI.md` | web UI specification |
+
+Consequences to respect:
+
+- every `SPEC §N` reference in code, tests and agent prompts means `docs/spec/SPEC.md` §N —
+  the section numbering did not change, only the file location;
+- README and other published documents must NOT link to these files: a clone does not have
+  them and the link would 404. Refer to them as "внутренняя спецификация" instead;
+- `tests/test_dsl_spec.py` reads `docs/spec/SPEC-DSL.md` and SKIPS when it is absent, so a
+  checkout without the specs still has a green suite;
+- when a spec changes, it changes locally only — there is nothing to push.
+
 ## Commands
 
 ```bash
@@ -48,7 +70,9 @@ violations (see below).
 - Tests first for engine logic; every feature lands with tests from SPEC §18. Tests use MockRuntime only — no network, no API keys, no real opencode.
 - Windows matters: UTF-8 everywhere explicitly, `pathlib` only, no POSIX-only calls (symlink must have copy fallback).
 - Keep `PROGRESS.md` updated: current phase, done/remaining SPEC sections.
-- Any deliberate deviation from SPEC.md: update SPEC.md in the same commit, mark with `> CHANGED (date): reason`.
+- Any deliberate deviation from SPEC.md: update `docs/spec/SPEC.md` in the same change, mark
+  with `> CHANGED (date): reason`. The spec is untracked, so it will not appear in the commit —
+  the commit message must then say what the spec now says.
 - Subagents: `test-engineer` when writing tests for a module or reproducing a bug; `spec-auditor` after completing each module and before declaring a phase done; `code-reviewer` before committing non-trivial diffs. This repo is git — commit per feature.
 
 ## Gotchas

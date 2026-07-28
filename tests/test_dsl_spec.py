@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 from refract.graph import ValidationContext, load_agents, validate_pipeline
@@ -19,10 +20,17 @@ from refract.models.pipeline import Pipeline
 from refract.registry import ArtifactRegistry
 
 REPO = Path(__file__).resolve().parents[1]
-DSL_SPEC = REPO / "SPEC-DSL.md"
+# The specs are internal and deliberately NOT in the repository (see CLAUDE.md);
+# they live under docs/spec/, which .gitignore excludes. On a clone without them
+# these guards skip instead of failing — the engine itself is fully tested either way.
+DSL_SPEC = REPO / "docs" / "spec" / "SPEC-DSL.md"
 LIBRARY = REPO / "library"
 
-_SPEC_TEXT = DSL_SPEC.read_text("utf-8")
+pytestmark = pytest.mark.skipif(
+    not DSL_SPEC.exists(), reason="docs/spec/SPEC-DSL.md is not present in this checkout"
+)
+
+_SPEC_TEXT = DSL_SPEC.read_text("utf-8") if DSL_SPEC.exists() else ""
 # codes as the document writes them: `E_SOMETHING` / `W_SOMETHING` in backticks
 _MENTIONED = set(re.findall(r"`([EW]_[A-Z_]+)`", _SPEC_TEXT))
 # codes that own a ROW in the §12 table — the closed list a reader consults. Mention
