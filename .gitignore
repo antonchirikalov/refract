@@ -13,6 +13,11 @@ __pycache__/
 runs/
 illustrator-sample/
 
+# Local agent permissions: names the MCP servers of THIS machine (including a
+# corporate one), so it is environment config, not project content. The reusable
+# part of .claude/ — the reviewer agents — stays tracked.
+.claude/settings.json
+
 # local / ops docs (environment-specific setup + smoke notes)
 # Contents, not the directory: ignoring `docs/` itself stops git descending,
 # and then no negation inside it can ever match.
