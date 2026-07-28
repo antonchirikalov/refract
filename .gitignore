@@ -14,11 +14,12 @@ runs/
 illustrator-sample/
 
 # local / ops docs (environment-specific setup + smoke notes)
-docs/
+# Contents, not the directory: ignoring `docs/` itself stops git descending,
+# and then no negation inside it can ever match.
+docs/*
 # ...except what README links to: it must not have broken links after a clone
 !docs/ARCHITECTURE.md
 !docs/architecture/
-!docs/architecture/*.png
 # local test-run scratch
 .smoke-home/
 .illus-smoke/
